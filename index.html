@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Hop Hop Bunny</title>
+  <style>
+    body { margin: 0; padding: 0; overflow: hidden; background: #87CEEB; }
+    canvas { display: block; margin: auto; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.min.js"></script>
+</head>
+<body>
+
+<script>
+const config = {
+  type: Phaser.AUTO,
+  width: 800,
+  height: 450,
+  physics: {
+    default: 'arcade',
+    arcade: { gravity: { y: 1000 }, debug: false }
+  },
+  scene: {
+    preload: preload,
+    create: create,
+    update: update
+  }
+};
+
+let bunny, ground, cursors, carrots, obstacles, score = 0, scoreText;
+let costumeStage = 0;
+const costumes = ['bunny', 'pirate', 'ninja', 'ballerina'];
+
+const game = new Phaser.Game(config);
+
+function preload() {
+  this.load.image('bg', 'https://i.imgur.com/9x0uL9f.png'); // Sky background
+  this.load.image('ground', 'https://i.imgur.com/Ma1R6Za.png');
+  this.load.image('carrot', 'https://i.imgur.com/2R0EjRM.png');
+  this.load.image('obstacle', 'https://i.imgur.com/TRE8ZDH.png');
+  
+  // Costumes (placeholder: use different bunny images for each)
+  this.load.image('bunny', 'https://i.imgur.com/RJ0vXkm.png'); // basic
+  this.load.image('pirate', 'https://i.imgur.com/y9OYxkh.png');
+  this.load.image('ninja', 'https://i.imgur.com/9GvRLFx.png');
+  this.load.image('ballerina', 'https://i.imgur.com/ukBwT7J.png');
+}
+
+function create() {
+  this.add.tileSprite(400, 225, 800, 450, 'bg').setScrollFactor(0);
+
+  ground = this.physics.add.staticGroup();
+  ground.create(400, 430, 'ground').setScale(2).refreshBody();
+
+  bunny = this.physics.add.sprite(150, 360, 'bunny').setScale(0.5).setCollideWorldBounds(true);
+  
+  carrots = this.physics.add.group();
+  obstacles = this.physics.add.group();
+
+  scoreText = this.add.text(16, 16, 'Carrots: 0', { fontSize: '20px', fill: '#fff' });
+
+  this.physics.add.collider(bunny, ground);
+  this.physics.add.overlap(bunny, carrots, collectCarrot, null, this);
+  this.physics.add.collider(bunny, obstacles, hitObstacle, null, this);
+
+  cursors = this.input.keyboard.createCursorKeys();
+  this.input.on('pointerdown', jump, this);
+
+  this.time.addEvent({ delay: 2000, callback: spawnCarrot, callbackScope: this, loop: true });
+  this.time.addEvent({ delay: 2500, callback: spawnObstacle, callbackScope: this, loop: true });
+}
+
+function update() {
+  if (bunny.body.touching.down) {
+    if (cursors.up.isDown) {
+      bunny.setVelocityY(-400);
+    }
+  }
+
+  carrots.children.iterate(child => { child.x -= 4; if (child.x < -50) child.destroy(); });
+  obstacles.children.iterate(child => { child.x -= 6; if (child.x < -50) child.destroy(); });
+}
+
+function jump() {
+  if (bunny.body.touching.down) bunny.setVelocityY(-400);
+}
+
+function collectCarrot(player, carrot) {
+  carrot.destroy();
+  score++;
+  scoreText.setText('Carrots: ' + score);
+  updateCostume();
+}
+
+function hitObstacle() {
+  this.scene.restart();
+  score = 0;
+  costumeStage = 0;
+}
+
+function spawnCarrot() {
+  const carrot = carrots.create(800, Phaser.Math.Between(300, 350), 'carrot').setScale(0.5);
+  carrot.body.allowGravity = false;
+}
+
+function spawnObstacle() {
+  const obstacle = obstacles.create(800, 390, 'obstacle').setScale(0.6);
+  obstacle.body.allowGravity = false;
+}
+
+function updateCostume() {
+  const stage = Math.floor(score / 5);
+  if (stage !== costumeStage && stage < costumes.length) {
+    costumeStage = stage;
+    bunny.setTexture(costumes[costumeStage]);
+  }
+}
+</script>
+
+</body>
+</html>
