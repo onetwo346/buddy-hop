@@ -30,14 +30,18 @@
                 this.carrots = 0;
                 this.groundOffset = 0;
                 this.isJumping = false;
+                this.isCrouching = false;
                 this.lastGroundTime = 0;
-                this.runFrame = 0;
+                this.hopFrame = 0; // Tracks hopping cycle
+                this.hopPhase = 0; // Normalized [0, 1]
                 this.blinkFrame = 0;
-                this.earTwitchFrame = 0;
-                this.tailWagFrame = 0;
-                this.wallDelay = 4000;
-                this.coyoteTime = 100;
-                this.runSpeed = 0; // Track horizontal speed for animation
+                this.noseTwitchFrame = 0;
+                this.earFlopFrame = 0;
+                this.tailFlickFrame = 0;
+                this.crouchTime = 0;
+                this.runSpeed = 0;
+                this.coyoteTime = 150; // More forgiving
+                this.hopSpeed = 0.25; // Base hop cycle speed
             }
 
             init(data) {
@@ -57,11 +61,11 @@
             }
 
             preload() {
-                // No external assets; all graphics generated in create()
+                // No external assets
             }
 
             create() {
-                // Initialize graphics objects
+                // Graphics objects
                 this.skyGraphics = this.add.graphics();
                 this.hillsGraphics = this.add.graphics();
                 this.bushesGraphics = this.add.graphics();
@@ -70,33 +74,33 @@
                 this.leftEarGraphics = this.add.graphics();
                 this.rightEarGraphics = this.add.graphics();
 
-                // Draw static background elements
+                // Background
                 this.drawSky();
                 this.drawBackground();
 
-                // Initialize clouds
+                // Clouds
                 this.clouds = [];
                 for (let i = 0; i < 3; i++) {
                     this.spawnCloud();
                 }
 
-                // Create ground
+                // Ground
                 this.drawGround();
                 this.ground = this.add.rectangle(400, 550, 800, 100, 0x00FF00).setAlpha(0);
                 this.physics.add.existing(this.ground, true);
 
-                // Create bunny
+                // Bunny
                 this.bunny = this.add.container(100, 300);
                 this.bunny.add([this.bunnyGraphics, this.leftEarGraphics, this.rightEarGraphics]);
                 this.bunny.setSize(60, 80);
                 this.physics.add.existing(this.bunny);
-                this.bunny.body.setGravityY(1500);
+                this.bunny.body.setGravityY(2000); // Tighter gravity
                 this.bunny.body.setCollideWorldBounds(true);
-                this.bunny.body.setMaxVelocityY(1000);
-                this.bunny.body.setDragX(800);
+                this.bunny.body.setMaxVelocityY(1200);
+                this.bunny.body.setDragX(3000); // Snappy stops
                 this.updateBunnyGraphics();
 
-                // Create groups
+                // Groups
                 this.platforms = this.physics.add.group({
                     allowGravity: false,
                     immovable: true
@@ -106,17 +110,17 @@
                     immovable: true
                 });
 
-                // Set up collisions
+                // Collisions
                 this.physics.add.collider(this.bunny, this.ground);
                 this.physics.add.collider(this.bunny, this.platforms);
                 this.physics.add.collider(this.bunny, this.walls);
 
-                // Input handling
+                // Input
                 this.cursors = this.input.keyboard.createCursorKeys();
-                this.input.on('pointerdown', this.jump, this);
-                this.input.keyboard.on('keydown-SPACE', this.jump, this);
+                this.input.on('pointerdown', this.initiateJump, this);
+                this.input.keyboard.on('keydown-SPACE', this.initiateJump, this);
 
-                // UI elements
+                // UI
                 this.scoreText = this.add.text(16, 16, 'Score: 0', {
                     fontSize: '32px',
                     fill: '#000',
@@ -128,7 +132,7 @@
                     fontStyle: 'bold'
                 });
 
-                // Timed events
+                // Events
                 this.time.addEvent({
                     delay: this.obstacleDelay,
                     callback: this.spawnObstacle,
@@ -148,13 +152,13 @@
                     loop: true
                 });
                 this.time.addEvent({
-                    delay: this.wallDelay,
+                    delay: 4000,
                     callback: this.spawnWall,
                     callbackScope: this,
                     loop: true
                 });
                 this.time.addEvent({
-                    delay: 60,
+                    delay: 20, // Ultra-smooth animations
                     callback: this.updateAnimations,
                     callbackScope: this,
                     loop: true
@@ -216,109 +220,136 @@
                 this.leftEarGraphics.clear();
                 this.rightEarGraphics.clear();
 
-                // Dynamic shadow based on vertical velocity and grounded state
-                const shadowScale = 1 + (this.bunny.body.touching.down ? 0.1 : Math.max(0, this.bunny.body.velocity.y / 1200));
-                this.bunnyGraphics.fillStyle(0x000000, this.bunny.body.touching.down ? 0.4 : 0.2);
-                this.bunnyGraphics.fillEllipse(0, 60, 70 * shadowScale, 15 / shadowScale);
+                // Shadow
+                const shadowScale = 1 + (this.bunny.body.touching.down ? 0.25 : Math.max(0, this.bunny.body.velocity.y / 1200));
+                this.bunnyGraphics.fillStyle(0x000000, this.bunny.body.touching.down ? 0.6 : 0.3);
+                this.bunnyGraphics.fillEllipse(0, 65, 80 * shadowScale, 15 / shadowScale);
 
-                // Body bounce based on run cycle
-                const bounce = this.bunny.body.touching.down ? 5 * Math.sin(this.runFrame * Math.PI / 5) : 0;
-                const bodyScaleY = this.isJumping ? 0.85 : 1.15 - 0.15 * Math.sin(this.runFrame * Math.PI / 4);
-                const bodyScaleX = this.runSpeed > 0 ? 1.15 : this.runSpeed < 0 ? 0.85 : 1;
-                this.bunnyGraphics.fillStyle(0xD3D8DC, 1);
-                this.bunnyGraphics.fillRoundedRect(-45 * bodyScaleX, -40 * bodyScaleY + bounce, 90 * bodyScaleX, 70 * bodyScaleY, 25);
-                this.bunnyGraphics.fillStyle(0xF8F9FA, 1);
-                this.bunnyGraphics.fillRoundedRect(-40 * bodyScaleX, -35 * bodyScaleY + bounce, 80 * bodyScaleX, 60 * bodyScaleY, 20);
-                this.bunnyGraphics.lineStyle(1, 0xB0B7C0, 0.6);
-                for (let x = -35; x <= 35; x += 10) {
-                    this.bunnyGraphics.lineBetween(x * bodyScaleX, -25 * bodyScaleY + bounce, x * bodyScaleX + 5, -15 * bodyScaleY + bounce);
+                // Hop and crouch
+                let hopHeight = 0;
+                let bodyScaleY = 1;
+                let bodyScaleX = 1;
+                let breathingOffset = 0;
+                if (this.bunny.body.touching.down && !this.isJumping) {
+                    if (this.isCrouching) {
+                        bodyScaleY = 0.75;
+                        bodyScaleX = 1.15;
+                        hopHeight = 15;
+                    } else {
+                        hopHeight = 15 * Math.sin(this.hopPhase * 2 * Math.PI); // Snappy hop
+                        bodyScaleY = 1 + 0.06 * Math.cos(this.hopPhase * 2 * Math.PI);
+                        bodyScaleX = Math.abs(this.runSpeed) > 50 ? 1.12 : 1.05;
+                        breathingOffset = Math.abs(this.runSpeed) < 50 ? 2 * Math.sin(this.time.now / 500) : 0;
+                    }
+                } else {
+                    bodyScaleY = 0.88;
+                    bodyScaleX = 1.1;
                 }
 
-                // Ear movement
-                const earAngleBase = this.runSpeed !== 0 ? 15 * Math.sign(this.runSpeed) : 0;
-                const earAngleLeft = this.earTwitchFrame === 1 ? earAngleBase - 20 : earAngleBase;
-                const earAngleRight = this.earTwitchFrame === 2 ? earAngleBase + 20 : earAngleBase;
+                // Body
+                this.bunnyGraphics.fillStyle(0xD3D8DC, 1);
+                this.bunnyGraphics.fillRoundedRect(-45 * bodyScaleX, -40 * bodyScaleY + hopHeight + breathingOffset, 90 * bodyScaleX, 70 * bodyScaleY, 25);
+                this.bunnyGraphics.fillStyle(0xF8F9FA, 1);
+                this.bunnyGraphics.fillRoundedRect(-40 * bodyScaleX, -35 * bodyScaleY + hopHeight + breathingOffset, 80 * bodyScaleX, 60 * bodyScaleY, 20);
+                this.bunnyGraphics.lineStyle(1, 0xB0B7C0, 0.6);
+                for (let x = -35; x <= 35; x += 10) {
+                    this.bunnyGraphics.lineBetween(x * bodyScaleX, -25 * bodyScaleY + hopHeight + breathingOffset, x * bodyScaleX + 5, -15 * bodyScaleY + hopHeight + breathingOffset);
+                }
+
+                // Ears
+                const earAngleBase = this.runSpeed !== 0 ? 12 * Math.sign(this.runSpeed) : 0;
+                const earFlop = this.earFlopFrame === 1 && Math.abs(this.runSpeed) < 50 ? -25 : 0;
+                const earAngleLeft = this.isCrouching ? earAngleBase + 10 : earAngleBase + earFlop;
+                const earAngleRight = this.isCrouching ? earAngleBase + 10 : earAngleBase + earFlop;
                 this.leftEarGraphics.setAngle(earAngleLeft);
                 this.rightEarGraphics.setAngle(earAngleRight);
                 this.leftEarGraphics.fillGradientStyle(0xF8F9FA, 0xE8ECEF, 0xF8F9FA, 0xE8ECEF, 1);
-                this.leftEarGraphics.fillEllipse(-30, -70 + bounce, 20, 50);
+                this.leftEarGraphics.fillEllipse(-30, -70 + hopHeight, 20, 50);
                 this.leftEarGraphics.fillStyle(0xFFC1CC, 1);
-                this.leftEarGraphics.fillEllipse(-30, -70 + bounce, 14, 40);
-                this.leftEarGraphics.lineStyle(1, 0xD3D3D3, 0.4);
-                this.leftEarGraphics.lineBetween(-30, -60 + bounce, -30, -50 + bounce);
+                this.leftEarGraphics.fillEllipse(-30, -70 + hopHeight, 14, 40);
                 this.rightEarGraphics.fillGradientStyle(0xF8F9FA, 0xE8ECEF, 0xF8F9FA, 0xE8ECEF, 1);
-                this.rightEarGraphics.fillEllipse(30, -68 + bounce, 20, 50);
+                this.rightEarGraphics.fillEllipse(30, -68 + hopHeight, 20, 50);
                 this.rightEarGraphics.fillStyle(0xFFC1CC, 1);
-                this.rightEarGraphics.fillEllipse(30, -68 + bounce, 14, 40);
-                this.rightEarGraphics.lineStyle(1, 0xD3D3D3, 0.4);
-                this.rightEarGraphics.lineBetween(30, -58 + bounce, 30, -48 + bounce);
+                this.rightEarGraphics.fillEllipse(30, -68 + hopHeight, 14, 40);
 
-                // Tail wag
-                const tailOffset = this.tailWagFrame * 4 * (Math.abs(this.runSpeed) / 200);
+                // Tail
+                const tailFlick = this.tailFlickFrame * 4 * (Math.abs(this.runSpeed) / 200 + 0.7);
                 this.bunnyGraphics.fillGradientStyle(0xFFFFFF, 0xF8F9FA, 0xFFFFFF, 0xF8F9FA, 1);
-                this.bunnyGraphics.fillCircle(-40 + tailOffset, 20 + bounce, 18);
+                this.bunnyGraphics.fillCircle(-40 + tailFlick, 20 + hopHeight + breathingOffset, 18);
                 this.bunnyGraphics.fillStyle(0xE8ECEF, 1);
-                this.bunnyGraphics.fillCircle(-40 + tailOffset, 20 + bounce, 14);
+                this.bunnyGraphics.fillCircle(-40 + tailFlick, 20 + hopHeight + breathingOffset, 14);
 
-                // Enhanced leg animation for bunny hop
-                const legHeight = this.isJumping ? 15 : 30 + 5 * Math.sin(this.runFrame * Math.PI / 5); // Add bounce to legs
+                // Legs
+                const legHeightBase = this.isJumping ? 12 : this.isCrouching ? 8 : 28;
+                const legHop = this.bunny.body.touching.down && !this.isCrouching ? 10 * Math.cos(this.hopPhase * 2 * Math.PI) : 0;
                 this.bunnyGraphics.fillStyle(0xF8F9FA, 1);
-                const legCycle = Math.floor(this.runFrame / 2) % 4; // Cycle through 4 phases for alternating legs
+                const legCycle = Math.floor(this.hopFrame / 1.5) % 6; // 6-phase hop
                 const legPositions = [
-                    // Phase 0: Left front and right back extended
-                    { x1: -35, y1: 15, h1: legHeight, x2: 15, y2: 25, h2: legHeight - 10 },
-                    // Phase 1: Right front and left back extended
-                    { x1: 15, y1: 15, h1: legHeight, x2: -35, y2: 25, h2: legHeight - 10 },
-                    // Phase 2: Left front and right back extended again (slight variation)
-                    { x1: -35, y1: 18, h1: legHeight - 3, x2: 15, y2: 28, h2: legHeight - 12 },
-                    // Phase 3: Right front and left back extended again
-                    { x1: 15, y1: 18, h1: legHeight - 3, x2: -35, y2: 28, h2: legHeight - 12 }
+                    { x1: -35, y1: 15, h1: legHeightBase + legHop, x2: 15, y2: 20, h2: legHeightBase + legHop - 5 }, // Push-off
+                    { x1: -35, y1: 12, h1: legHeightBase + legHop + 5, x2: 15, y2: 18, h2: legHeightBase + legHop }, // Lift
+                    { x1: 15, y1: 15, h1: legHeightBase + legHop, x2: -35, y2: 20, h2: legHeightBase + legHop - 5 }, // Peak
+                    { x1: 15, y1: 12, h1: legHeightBase + legHop + 5, x2: -35, y2: 18, h2: legHeightBase + legHop }, // Descent
+                    { x1: -35, y1: 18, h1: legHeightBase + legHop - 3, x2: 15, y2: 22, h2: legHeightBase + legHop - 7 }, // Land
+                    { x1: 15, y1: 18, h1: legHeightBase + legHop - 3, x2: -35, y2: 22, h2: legHeightBase + legHop - 7 } // Recover
                 ];
                 const pos = legPositions[legCycle];
-                this.bunnyGraphics.fillRoundedRect(pos.x1 * bodyScaleX, pos.y1 + bounce, 20, pos.h1, 8);
-                this.bunnyGraphics.fillRoundedRect(pos.x2 * bodyScaleX, pos.y2 + bounce, 20, pos.h2, 8);
+                this.bunnyGraphics.fillRoundedRect(pos.x1 * bodyScaleX, pos.y1 + hopHeight + breathingOffset, 20, pos.h1, 8);
+                this.bunnyGraphics.fillRoundedRect(pos.x2 * bodyScaleX, pos.y2 + hopHeight + breathingOffset, 20, pos.h2, 8);
 
-                // Face and eyes
-                this.bunnyGraphics.fillStyle(this.blinkFrame > 0 ? 0x000000 : 0x000000, 1);
-                const eyeSize = Math.abs(this.runSpeed) > 10 ? 10 : 9;
-                const eyeHeight = this.blinkFrame > 0 ? 4 : 9;
-                this.bunnyGraphics.fillEllipse(-20, -18 + bounce, eyeSize, eyeHeight);
-                this.bunnyGraphics.fillEllipse(20, -18 + bounce, eyeSize, eyeHeight);
+                // Face
+                const eyeSize = Math.abs(this.runSpeed) > 50 ? 11 : 9;
+                const eyeHeight = this.blinkFrame > 0 ? 3 : 9;
+                this.bunnyGraphics.fillStyle(0x000000, 1);
+                this.bunnyGraphics.fillEllipse(-20, -18 + hopHeight + breathingOffset, eyeSize, eyeHeight);
+                this.bunnyGraphics.fillEllipse(20, -18 + hopHeight + breathingOffset, eyeSize, eyeHeight);
                 if (!this.blinkFrame) {
                     this.bunnyGraphics.fillStyle(0xFFFFFF, 1);
-                    this.bunnyGraphics.fillCircle(-19, -19 + bounce, 3);
-                    this.bunnyGraphics.fillCircle(21, -19 + bounce, 3);
-                }
-                this.bunnyGraphics.lineStyle(1, 0x000000, 0.8);
-                if (!this.blinkFrame) {
-                    this.bunnyGraphics.lineBetween(-20, -23 + bounce, -22, -25 + bounce);
-                    this.bunnyGraphics.lineBetween(-18, -23 + bounce, -20, -25 + bounce);
-                    this.bunnyGraphics.lineBetween(20, -23 + bounce, 22, -25 + bounce);
-                    this.bunnyGraphics.lineBetween(18, -23 + bounce, 20, -25 + bounce);
+                    this.bunnyGraphics.fillCircle(-19, -19 + hopHeight + breathingOffset, 3);
+                    this.bunnyGraphics.fillCircle(21, -19 + hopHeight + breathingOffset, 3);
                 }
                 this.bunnyGraphics.fillStyle(0xFFC1CC, 1);
-                this.bunnyGraphics.fillTriangle(0, -6 + bounce, -7, -3 + bounce, 7, -3 + bounce);
-                this.bunnyGraphics.fillEllipse(0, -3 + bounce, 14, 7);
-                const whiskerAngle = this.runSpeed / 40;
+                const noseOffset = this.noseTwitchFrame ? 2 : 0;
+                this.bunnyGraphics.fillTriangle(0, -6 + hopHeight + breathingOffset + noseOffset, -7, -3 + hopHeight + breathingOffset + noseOffset, 7, -3 + hopHeight + breathingOffset + noseOffset);
+                this.bunnyGraphics.fillEllipse(0, -3 + hopHeight + breathingOffset + noseOffset, 14, 7);
+                const whiskerSway = this.runSpeed / 60 + (this.noseTwitchFrame ? 0.5 : 0);
                 this.bunnyGraphics.lineStyle(1, 0xFFFFFF, 0.9);
-                this.bunnyGraphics.lineBetween(-14, -3 + bounce, -35, -3 + whiskerAngle + bounce);
-                this.bunnyGraphics.lineBetween(-14, 0 + bounce, -33, 3 + whiskerAngle + bounce);
-                this.bunnyGraphics.lineBetween(14, -3 + bounce, 35, -3 + whiskerAngle + bounce);
-                this.bunnyGraphics.lineBetween(14, 0 + bounce, 33, 3 + whiskerAngle + bounce);
+                this.bunnyGraphics.lineBetween(-14, -3 + hopHeight + breathingOffset, -35, -3 + whiskerSway + hopHeight + breathingOffset);
+                this.bunnyGraphics.lineBetween(-14, 0 + hopHeight + breathingOffset, -33, 3 + whiskerSway + hopHeight + breathingOffset);
+                this.bunnyGraphics.lineBetween(14, -3 + hopHeight + breathingOffset, 35, -3 + whiskerSway + hopHeight + breathingOffset);
+                this.bunnyGraphics.lineBetween(14, 0 + hopHeight + breathingOffset, 33, 3 + whiskerSway + hopHeight + breathingOffset);
+
+                // Dust trail
+                if (Math.abs(this.runSpeed) > 100 && this.bunny.body.touching.down && this.hopPhase > 0.4 && this.hopPhase < 0.6) {
+                    const dust = this.add.circle(this.bunny.x - 30 * Math.sign(this.runSpeed || 1), this.bunny.y + 30, 5, 0xA9A9A9, 0.4);
+                    this.tweens.add({
+                        targets: dust,
+                        x: dust.x + Phaser.Math.Between(-20, 20),
+                        y: dust.y - Phaser.Math.Between(10, 20),
+                        alpha: 0,
+                        duration: 300,
+                        onComplete: () => dust.destroy()
+                    });
+                }
             }
 
             updateAnimations() {
                 try {
-                    if (this.bunny.body.touching.down && !this.isJumping && Math.abs(this.runSpeed) > 10) {
-                        this.runFrame = (this.runFrame + 1) % 8; // 8 frames for smoother cycle
-                        this.bunny.angle = 7 * Math.sin(this.runFrame * Math.PI / 4);
+                    if (this.bunny.body.touching.down && !this.isJumping && !this.isCrouching) {
+                        const speedFactor = 1 + Math.abs(this.runSpeed) / this.speed; // Faster hops when running
+                        this.hopFrame = (this.hopFrame + this.hopSpeed * speedFactor) % 6;
+                        this.hopPhase = this.hopFrame / 6;
+                        const tiltAngle = Math.abs(this.runSpeed) > 50 ? 10 * Math.sin(this.hopPhase * 2 * Math.PI) * Math.sign(this.runSpeed) : 5 * Math.sin(this.hopPhase * 2 * Math.PI);
+                        this.bunny.angle = tiltAngle;
+                    } else if (this.isJumping) {
+                        this.bunny.angle = 25 * Math.sin(this.bunny.body.velocity.y / 250) * Math.sign(this.runSpeed || 1);
                     } else {
-                        this.bunny.angle = this.isJumping ? 40 * Math.sin(this.bunny.body.velocity.y / 100) : 0;
+                        this.bunny.angle = 0;
                     }
 
-                    this.blinkFrame = (this.time.now % 3600 < 120) ? 1 : 0;
-                    this.earTwitchFrame = (this.time.now % 3000 < 1000) ? Phaser.Math.Between(1, 2) : 0;
-                    this.tailWagFrame = (this.time.now % 600 < 200) ? Phaser.Math.Between(1, 2) : 0;
+                    this.blinkFrame = (this.time.now % 4500 < 80) ? 1 : 0;
+                    this.noseTwitchFrame = (this.time.now % 2000 < 200) ? 1 : 0;
+                    this.earFlopFrame = (this.time.now % 5000 < 300) ? 1 : 0;
+                    this.tailFlickFrame = (this.time.now % 600 < 200) ? Phaser.Math.Between(1, 2) : 0;
                     this.updateBunnyGraphics();
                 } catch (error) {
                     console.warn('Error updating animations:', error);
@@ -326,17 +357,89 @@
             }
 
             moveRight() {
-                const accel = this.bunny.body.touching.down ? 1200 + Math.abs(this.bunny.body.velocity.x) * 0.1 : 800;
-                this.bunny.body.setAccelerationX(accel);
-                this.bunny.scaleX = 1;
-                this.runSpeed = Math.min(this.speed, this.bunny.body.velocity.x);
+                if (this.bunny.body.touching.down && !this.isCrouching) {
+                    this.bunny.body.setVelocityX(this.speed * 1.3); // Instant speed
+                    this.bunny.scaleX = 1;
+                    this.runSpeed = this.bunny.body.velocity.x;
+                }
             }
 
             moveLeft() {
-                const accel = this.bunny.body.touching.down ? 1200 + Math.abs(this.bunny.body.velocity.x) * 0.1 : 800;
-                this.bunny.body.setAccelerationX(-accel);
-                this.bunny.scaleX = -1;
-                this.runSpeed = Math.max(-this.speed, this.bunny.body.velocity.x);
+                if (this.bunny.body.touching.down && !this.isCrouching) {
+                    this.bunny.body.setVelocityX(-this.speed * 1.3);
+                    this.bunny.scaleX = -1;
+                    this.runSpeed = this.bunny.body.velocity.x;
+                }
+            }
+
+            initiateJump() {
+                try {
+                    if (this.bunny.body.touching.down || (this.time.now - this.lastGroundTime < this.coyoteTime)) {
+                        if (!this.isCrouching) {
+                            this.isCrouching = true;
+                            this.crouchTime = this.time.now;
+                            this.tweens.add({
+                                targets: this.bunny,
+                                scaleY: 0.75,
+                                scaleX: 1.15,
+                                duration: 80,
+                                onComplete: () => {
+                                    if (this.bunny && this.bunny.active) {
+                                        this.performJump();
+                                    }
+                                }
+                            });
+                            // Tail flick anticipation
+                            this.tailFlickFrame = 2;
+                            this.updateBunnyGraphics();
+                        }
+                    }
+                } catch (error) {
+                    console.warn('Error initiating jump:', error);
+                }
+            }
+
+            performJump() {
+                try {
+                    if (this.isCrouching && (this.bunny.body.touching.down || (this.time.now - this.lastGroundTime < this.coyoteTime))) {
+                        const jumpVelocity = -950 - Math.abs(this.runSpeed) * 0.3;
+                        this.bunny.body.setVelocityY(jumpVelocity);
+                        this.isJumping = true;
+                        this.isCrouching = false;
+                        this.tweens.add({
+                            targets: this.bunny,
+                            scale: { x: 1.25, y: 0.85 },
+                            angle: this.runSpeed > 0 ? 35 : -35,
+                            duration: 180,
+                            yoyo: true,
+                            onComplete: () => {
+                                if (this.bunny && this.bunny.active) {
+                                    this.bunny.scale = 1;
+                                    this.bunny.angle = 0;
+                                }
+                            }
+                        });
+                        const dust = this.add.graphics();
+                        dust.fillStyle(0xA9A9A9, 0.6);
+                        for (let i = 0; i < 12; i++) {
+                            const dustParticle = this.add.circle(this.bunny.x + Phaser.Math.Between(-25, 25), this.bunny.y + 30, 4, 0xA9A9A9, 0.6);
+                            this.tweens.add({
+                                targets: dustParticle,
+                                x: dustParticle.x + Phaser.Math.Between(-40, 40),
+                                y: dustParticle.y + Phaser.Math.Between(10, 30),
+                                alpha: 0,
+                                duration: 350,
+                                onComplete: () => {
+                                    if (dustParticle && dustParticle.active) {
+                                        dustParticle.destroy();
+                                    }
+                                }
+                            });
+                        }
+                    }
+                } catch (error) {
+                    console.warn('Error performing jump:', error);
+                }
             }
 
             spawnObstacle() {
@@ -568,48 +671,6 @@
                 }
             }
 
-            jump() {
-                try {
-                    if (this.bunny.body.touching.down || (this.time.now - this.lastGroundTime < this.coyoteTime)) {
-                        const jumpVelocity = -850 - Math.abs(this.bunny.body.velocity.x) * 0.2;
-                        this.bunny.body.setVelocityY(jumpVelocity);
-                        this.isJumping = true;
-                        this.tweens.add({
-                            targets: this.bunny,
-                            angle: this.bunny.body.velocity.x > 0 ? 45 : -45,
-                            scale: { x: 1.3, y: 0.8 },
-                            duration: 250,
-                            yoyo: true,
-                            onComplete: () => {
-                                if (this.bunny && this.bunny.active) {
-                                    this.bunny.angle = 0;
-                                    this.bunny.scale = 1;
-                                }
-                            }
-                        });
-                        const dust = this.add.graphics();
-                        dust.fillStyle(0xA9A9A9, 0.5);
-                        for (let i = 0; i < 12; i++) {
-                            const dustParticle = this.add.circle(this.bunny.x + Phaser.Math.Between(-20, 20), this.bunny.y + 25, 4, 0xA9A9A9, 0.5);
-                            this.tweens.add({
-                                targets: dustParticle,
-                                x: dustParticle.x + Phaser.Math.Between(-30, 30),
-                                y: dustParticle.y + Phaser.Math.Between(15, 40),
-                                alpha: 0,
-                                duration: 500,
-                                onComplete: () => {
-                                    if (dustParticle && dustParticle.active) {
-                                        dustParticle.destroy();
-                                    }
-                                }
-                            });
-                        }
-                    }
-                } catch (error) {
-                    console.warn('Error handling jump:', error);
-                }
-            }
-
             gameOver() {
                 try {
                     this.physics.pause();
@@ -629,17 +690,17 @@
                         this.lastGroundTime = time;
                     }
 
-                    if (this.cursors.right.isDown) {
+                    if (this.cursors.right.isDown && !this.isCrouching) {
                         this.moveRight();
-                    } else if (this.cursors.left.isDown) {
+                    } else if (this.cursors.left.isDown && !this.isCrouching) {
                         this.moveLeft();
                     } else {
-                        this.bunny.body.setAccelerationX(0);
-                        this.bunny.body.setDragX(1200); // Increased drag for smoother stop
-                        this.runSpeed = 0; // Reset run speed when not moving
+                        this.bunny.body.setVelocityX(0);
+                        this.runSpeed *= 0.85; // Smooth stop
+                        if (Math.abs(this.runSpeed) < 20) this.runSpeed = 0;
                     }
 
-                    this.bunny.body.velocity.x = Phaser.Math.Clamp(this.bunny.body.velocity.x, -this.speed * 1.2, this.speed * 1.2);
+                    this.bunny.body.velocity.x = Phaser.Math.Clamp(this.bunny.body.velocity.x, -this.speed * 1.5, this.speed * 1.5);
 
                     if (!this.bunny.body.touching.down) {
                         this.score += delta / 1000 * 10;
@@ -648,9 +709,9 @@
                         this.isJumping = false;
                         this.tweens.add({
                             targets: this.bunny,
-                            y: this.bunny.y + 15,
+                            y: this.bunny.y + 12,
                             scale: { x: 1.2, y: 0.8 },
-                            duration: 150,
+                            duration: 90,
                             yoyo: true,
                             onComplete: () => {
                                 if (this.bunny && this.bunny.active) {
@@ -660,7 +721,6 @@
                         });
                     }
 
-                    this.runSpeed = this.bunny.body.velocity.x; // Update run speed for animation
                     this.groundOffset += 2;
                     this.hillsGraphics.x -= 0.5;
                     this.bushesGraphics.x -= 1;
