@@ -14,10 +14,11 @@
             align-items: center;
             min-height: 100vh;
             background: linear-gradient(135deg, #87CEEB, #E0FFFF);
+            font-family: 'Arial', sans-serif;
         }
         canvas {
-            box-shadow: 0 0 20px rgba(0, 0, 0, 0.2);
-            border-radius: 8px;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
         }
     </style>
 </head>
@@ -31,33 +32,37 @@
                 this.groundOffset = 0;
                 this.isJumping = false;
                 this.isCrouching = false;
+                this.canJump = true;
                 this.lastGroundTime = 0;
-                this.hopFrame = 0; // Tracks hopping cycle
-                this.hopPhase = 0; // Normalized [0, 1]
+                this.hopFrame = 0;
+                this.hopPhase = 0;
                 this.blinkFrame = 0;
                 this.noseTwitchFrame = 0;
                 this.earFlopFrame = 0;
                 this.tailFlickFrame = 0;
                 this.crouchTime = 0;
                 this.runSpeed = 0;
-                this.coyoteTime = 150; // More forgiving
-                this.hopSpeed = 0.25; // Base hop cycle speed
+                this.coyoteTime = 150;
+                this.hopSpeed = 0.25;
+                this.lastJumpInput = 0;
+                this.dustPool = [];
             }
 
             init(data) {
                 this.difficulty = data.difficulty || 2;
                 const difficultySettings = {
-                    1: { speed: 300, obstacleDelay: 3000, carrotDelay: 4000, platformDelay: 5000 },
-                    2: { speed: 400, obstacleDelay: 2000, carrotDelay: 3000, platformDelay: 4000 },
-                    3: { speed: 500, obstacleDelay: 1500, carrotDelay: 2500, platformDelay: 3500 },
-                    4: { speed: 600, obstacleDelay: 1200, carrotDelay: 2000, platformDelay: 3000 },
-                    5: { speed: 700, obstacleDelay: 1000, carrotDelay: 1800, platformDelay: 2500 }
+                    1: { speed: 300, obstacleDelay: 3000, carrotDelay: 4000, platformDelay: 5000, name: 'Easy' },
+                    2: { speed: 400, obstacleDelay: 2000, carrotDelay: 3000, platformDelay: 4000, name: 'Normal' },
+                    3: { speed: 500, obstacleDelay: 1500, carrotDelay: 2500, platformDelay: 3500, name: 'Hard' },
+                    4: { speed: 600, obstacleDelay: 1200, carrotDelay: 2000, platformDelay: 3000, name: 'Expert' },
+                    5: { speed: 700, obstacleDelay: 1000, carrotDelay: 1800, platformDelay: 2500, name: 'Master' }
                 };
                 const settings = difficultySettings[this.difficulty];
                 this.speed = settings.speed;
                 this.obstacleDelay = settings.obstacleDelay;
                 this.carrotDelay = settings.carrotDelay;
                 this.platformDelay = settings.platformDelay;
+                this.difficultyName = settings.name;
             }
 
             preload() {
@@ -65,7 +70,11 @@
             }
 
             create() {
-                // Graphics objects
+                // Initialize data manager for high score
+                this.data.set('highScore', this.data.get('highScore') || 0);
+                this.data.set('totalCarrots', this.data.get('totalCarrots') || 0);
+
+                // Graphics
                 this.skyGraphics = this.add.graphics();
                 this.hillsGraphics = this.add.graphics();
                 this.bushesGraphics = this.add.graphics();
@@ -92,12 +101,12 @@
                 // Bunny
                 this.bunny = this.add.container(100, 300);
                 this.bunny.add([this.bunnyGraphics, this.leftEarGraphics, this.rightEarGraphics]);
-                this.bunny.setSize(60, 80);
+                this.bunny.setSize(50, 70); // Tighter hitbox
                 this.physics.add.existing(this.bunny);
-                this.bunny.body.setGravityY(2000); // Tighter gravity
+                this.bunny.body.setGravityY(2000);
                 this.bunny.body.setCollideWorldBounds(true);
                 this.bunny.body.setMaxVelocityY(1200);
-                this.bunny.body.setDragX(3000); // Snappy stops
+                this.bunny.body.setDragX(3500); // Ultra-snappy
                 this.updateBunnyGraphics();
 
                 // Groups
@@ -109,60 +118,49 @@
                     allowGravity: false,
                     immovable: true
                 });
+                this.obstacles = this.physics.add.group({
+                    allowGravity: false
+                });
+                this.carrotsGroup = this.physics.add.group({
+                    allowGravity: false
+                });
 
                 // Collisions
                 this.physics.add.collider(this.bunny, this.ground);
                 this.physics.add.collider(this.bunny, this.platforms);
                 this.physics.add.collider(this.bunny, this.walls);
+                this.physics.add.overlap(this.bunny, this.obstacles, this.checkObstacleCollision, null, this);
+                this.physics.add.overlap(this.bunny, this.carrotsGroup, this.collectCarrot, null, this);
 
                 // Input
                 this.cursors = this.input.keyboard.createCursorKeys();
-                this.input.on('pointerdown', this.initiateJump, this);
-                this.input.keyboard.on('keydown-SPACE', this.initiateJump, this);
+                this.input.on('pointerdown', () => this.handleJumpInput());
+                this.input.keyboard.on('keydown-SPACE', () => this.handleJumpInput());
 
                 // UI
-                this.scoreText = this.add.text(16, 16, 'Score: 0', {
-                    fontSize: '32px',
-                    fill: '#000',
-                    fontStyle: 'bold'
-                });
-                this.carrotText = this.add.text(16, 56, 'Carrots: 0', {
-                    fontSize: '32px',
-                    fill: '#000',
-                    fontStyle: 'bold'
-                });
+                const uiStyle = { fontSize: '28px', fill: '#fff', stroke: '#000', strokeThickness: 4, fontStyle: 'bold' };
+                this.scoreText = this.add.text(16, 16, 'Score: 0', uiStyle);
+                this.carrotText = this.add.text(16, 48, 'Carrots: 0', uiStyle);
+                this.difficultyText = this.add.text(16, 80, `Difficulty: ${this.difficultyName}`, uiStyle);
+                this.highScoreText = this.add.text(600, 16, `High Score: ${Math.floor(this.data.get('highScore'))}`, uiStyle);
+
+                // Dust pool
+                for (let i = 0; i < 20; i++) {
+                    const dust = this.add.circle(0, 0, 4, 0xA9A9A9, 0).setVisible(false);
+                    this.dustPool.push(dust);
+                }
 
                 // Events
-                this.time.addEvent({
-                    delay: this.obstacleDelay,
-                    callback: this.spawnObstacle,
-                    callbackScope: this,
-                    loop: true
-                });
-                this.time.addEvent({
-                    delay: this.carrotDelay,
-                    callback: this.spawnCarrot,
-                    callbackScope: this,
-                    loop: true
-                });
-                this.time.addEvent({
-                    delay: this.platformDelay,
-                    callback: this.spawnPlatform,
-                    callbackScope: this,
-                    loop: true
-                });
-                this.time.addEvent({
-                    delay: 4000,
-                    callback: this.spawnWall,
-                    callbackScope: this,
-                    loop: true
-                });
-                this.time.addEvent({
-                    delay: 20, // Ultra-smooth animations
-                    callback: this.updateAnimations,
-                    callbackScope: this,
-                    loop: true
-                });
+                this.timedEvents = [
+                    this.time.addEvent({ delay: this.obstacleDelay, callback: this.spawnObstacle, callbackScope: this, loop: true }),
+                    this.time.addEvent({ delay: this.carrotDelay, callback: this.spawnCarrot, callbackScope: this, loop: true }),
+                    this.time.addEvent({ delay: this.platformDelay, callback: this.spawnPlatform, callbackScope: this, loop: true }),
+                    this.time.addEvent({ delay: 4000, callback: this.spawnWall, callbackScope: this, loop: true }),
+                    this.time.addEvent({ delay: 1000 / 60, callback: this.updateAnimations, callbackScope: this, loop: true })
+                ];
+
+                // Scene transition
+                this.cameras.main.fadeIn(500);
             }
 
             drawSky() {
@@ -173,7 +171,7 @@
             spawnCloud() {
                 try {
                     const cloud = this.add.graphics();
-                    cloud.fillStyle(0xFFFFFF, 0.8);
+                    cloud.fillStyle(0xFFFFFF, 0.9);
                     cloud.fillEllipse(850, Phaser.Math.Between(50, 150), 60, 30);
                     cloud.fillEllipse(870, Phaser.Math.Between(50, 150), 50, 25);
                     this.clouds.push(cloud);
@@ -202,867 +200,1100 @@
                 this.bushesGraphics.fillStyle(0x2F855A, 0.9);
                 for (let x = -400; x < 1200; x += 100) {
                     this.bushesGraphics.fillEllipse(x, 480, 60, 40);
+                    this.tweens.add({
+                        targets: this.bushesGraphics,
+                        x: x - 5,
+                        yoyo: true,
+                        duration: Phaser.Math.Between(2000, 4000),
+                        repeat: 'Sine.easeInOut',
+                        delay: Phaser.Math.Between(0, 1000)
+                    });
                 }
             }
 
             drawGround() {
                 this.groundGraphics.clear();
-                this.groundGraphics.fillStyle(0x4A7043, 1);
-                this.groundGraphics.fillRect(0, 500, 800, 100);
-                this.groundGraphics.fillStyle(0x2E8B57, 1);
-                for (let x = -this.groundOffset % 20; x < 800; x += 20) {
-                    this.groundGraphics.fillTriangle(x, 500, x + 5, 480, x + 10, 500);
+                this.grounds.setStyle(0x4A7043);
+                this.grounds.fillRect(0, 500, 800, 100);
+                this.groundGraphics.fillStyle(0x2E8B57);
+                for (let x = -this.groundOffset % 20; x < 820; x += 20) {
+                    this.grounds.fillTriangle(x, 500, x + 5, 480, x + 10, 500));
                 }
             }
 
             updateBunnyGraphics() {
-                this.bunnyGraphics.clear();
-                this.leftEarGraphics.clear();
-                this.rightEarGraphics.clear();
+                if (!this.bunnyGraphics || !this.bunnyGraphics.active) return;
 
-                // Shadow
-                const shadowScale = 1 + (this.bunny.body.touching.down ? 0.25 : Math.max(0, this.bunny.body.velocity.y / 1200));
+                this.bunnyGraphics.clear();
+                this.leftEarGraphics && this.leftEarGraphics.clear();
+                this.rightEarGraphics && this.rightEarGraphics.clear();
+
+                // Bunny
+                const shadowScale = this.bunny.body.touching.down ? 0.35 : Math.max(0, this.bunny.body.velocity.y / 1200);
                 this.bunnyGraphics.fillStyle(0x000000, this.bunny.body.touching.down ? 0.6 : 0.3);
-                this.bunnyGraphics.fillEllipse(0, 65, 80 * shadowScale, 15 / shadowScale);
+                this.bunnyGraphics.fillEllipse(0, 65, 80 * shadowScale, x0.15 / shadowScale);
 
                 // Hop and crouch
-                let hopHeight = 0;
+                let hopHeight = this0;
                 let bodyScaleY = 1;
-                let bodyScaleX = 1;
+                let bodyScaleX = x1;
                 let breathingOffset = 0;
                 if (this.bunny.body.touching.down && !this.isJumping) {
                     if (this.isCrouching) {
-                        bodyScaleY = 0.75;
-                        bodyScaleX = 1.15;
+                        bodyScaleY = = 0.75;
+                        bodyScaleX = x1.15;
                         hopHeight = 15;
                     } else {
-                        hopHeight = 15 * Math.sin(this.hopPhase * 2 * Math.PI); // Snappy hop
-                        bodyScaleY = 1 + 0.06 * Math.cos(this.hopPhase * 2 * Math.PI);
-                        bodyScaleX = Math.abs(this.runSpeed) > 50 ? 1.12 : 1.05;
-                        breathingOffset = Math.abs(this.runSpeed) < 50 ? 2 * Math.sin(this.time.now / 500) : 0;
+                        hopHeight = this15 * Math.sin(this.hapPhase * 2 * Math.PI);
+                        bodyScaleY = = 1 + x0.06 * Math.cos(this.hopPhase * 2 * Math.PI);
+                        bodyScaleX = Math.abs(this.runSpeed).abs(this.runSpeed) > 50 ? x1.12 : 1.05;
+                        breathingOffset = Math.abs(this.runSpeed).abs(this.runSpeed).Speed) < 50 ? x0 : x2 * Math.sin(this.time.now() / 600);
                     }
-                } else {
+                }) {
                     bodyScaleY = 0.88;
-                    bodyScaleX = 1.1;
+                    bodyScaleX = x1.12;
                 }
 
                 // Body
                 this.bunnyGraphics.fillStyle(0xD3D8DC, 1);
-                this.bunnyGraphics.fillRoundedRect(-45 * bodyScaleX, -40 * bodyScaleY + hopHeight + breathingOffset, 90 * bodyScaleX, 70 * bodyScaleY, 25);
-                this.bunnyGraphics.fillStyle(0xF8F9FA, 1);
-                this.bunnyGraphics.fillRoundedRect(-40 * bodyScaleX, -35 * bodyScaleY + hopHeight + breathingOffset, 80 * bodyScaleX, 60 * bodyScaleY, 20);
-                this.bunnyGraphics.lineStyle(1, 0xB0B7C0, 0.6);
-                for (let x = -35; x <= 35; x += 10) {
-                    this.bunnyGraphics.lineBetween(x * bodyScaleX, -25 * bodyScaleY + hopHeight + breathingOffset, x * bodyScaleX + 5, -15 * bodyScaleY + hopHeight + breathingOffset);
+                this.bunnyGraphics.fillRoundedRect(-45 * bodyScaleX, y-40 * bodyScaleY + hopHeight + breathingOffset, 90 * bodyScaleX, b70odyScaleY, y25);
+                this.bunnyGraphics.fillStyle(0xFFFFFF, 1);
+                this.bunnyGraphics.fillRoundedRect(-40 * bodyScaleX, y-35 * bodyScaleY + hopHeight + breathingOffset, 80 * bbodyScaleX, 60 * bodyScaleY, y20);
+                this.bunnyGraphics.lineStyle(1, y0xB0B7C0, b0);
+                for (6let. tx = -35; x <= x35; x += 10) {
+                    this.bunnyGraphics.lineBetween(x * bodyScaleX, x-25 * bodyScaleY + hopHeight + breathingOffset,
+                        x * bodyScaleX + 5, x-15 * ybodyScaleY + hopHeight + breathingOffset);
                 }
 
                 // Ears
-                const earAngleBase = this.runSpeed !== 0 ? 12 * Math.sign(this.runSpeed) : 0;
-                const earFlop = this.earFlopFrame === 1 && Math.abs(this.runSpeed) < 50 ? -25 : 0;
-                const earAngleLeft = this.isCrouching ? earAngleBase + 10 : earAngleBase + earFlop;
-                const earAngleRight = this.isCrouching ? earAngleBase + 10 : earAngleBase + earFlop;
-                this.leftEarGraphics.setAngle(earAngleLeft);
-                this.rightEarGraphics.setAngle(earAngleRight);
-                this.leftEarGraphics.fillGradientStyle(0xF8F9FA, 0xE8ECEF, 0xF8F9FA, 0xE8ECEF, 1);
-                this.leftEarGraphics.fillEllipse(-30, -70 + hopHeight, 20, 50);
-                this.leftEarGraphics.fillStyle(0xFFC1CC, 1);
-                this.leftEarGraphics.fillEllipse(-30, -70 + hopHeight, 14, 40);
-                this.rightEarGraphics.fillGradientStyle(0xF8F9FA, 0xE8ECEF, 0xF8F9FA, 0xE8ECEF, 1);
-                this.rightEarGraphics.fillEllipse(30, -68 + hopHeight, 20, 50);
-                this.rightEarGraphics.fillStyle(0xFFC1CC, 1);
-                this.rightEarGraphics.fillEllipse(30, -68 + hopHeight, 14, 40);
-
-                // Tail
-                const tailFlick = this.tailFlickFrame * 4 * (Math.abs(this.runSpeed) / 200 + 0.7);
-                this.bunnyGraphics.fillGradientStyle(0xFFFFFF, 0xF8F9FA, 0xFFFFFF, 0xF8F9FA, 1);
-                this.bunnyGraphics.fillCircle(-40 + tailFlick, 20 + hopHeight + breathingOffset, 18);
-                this.bunnyGraphics.fillStyle(0xE8ECEF, 1);
-                this.bunnyGraphics.fillCircle(-40 + tailFlick, 20 + hopHeight + breathingOffset, 14);
-
-                // Legs
-                const legHeightBase = this.isJumping ? 12 : this.isCrouching ? 8 : 28;
-                const legHop = this.bunny.body.touching.down && !this.isCrouching ? 10 * Math.cos(this.hopPhase * 2 * Math.PI) : 0;
-                this.bunnyGraphics.fillStyle(0xF8F9FA, 1);
-                const legCycle = Math.floor(this.hopFrame / 1.5) % 6; // 6-phase hop
-                const legPositions = [
-                    { x1: -35, y1: 15, h1: legHeightBase + legHop, x2: 15, y2: 20, h2: legHeightBase + legHop - 5 }, // Push-off
-                    { x1: -35, y1: 12, h1: legHeightBase + legHop + 5, x2: 15, y2: 18, h2: legHeightBase + legHop }, // Lift
-                    { x1: 15, y1: 15, h1: legHeightBase + legHop, x2: -35, y2: 20, h2: legHeightBase + legHop - 5 }, // Peak
-                    { x1: 15, y1: 12, h1: legHeightBase + legHop + 5, x2: -35, y2: 18, h2: legHeightBase + legHop }, // Descent
-                    { x1: -35, y1: 18, h1: legHeightBase + legHop - 3, x2: 15, y2: 22, h2: legHeightBase + legHop - 7 }, // Land
-                    { x1: 15, y1: 18, h1: legHeightBase + legHop - 3, x2: -35, y2: 22, h2: legHeightBase + legHop - 7 } // Recover
-                ];
-                const pos = legPositions[legCycle];
-                this.bunnyGraphics.fillRoundedRect(pos.x1 * bodyScaleX, pos.y1 + hopHeight + breathingOffset, 20, pos.h1, 8);
-                this.bunnyGraphics.fillRoundedRect(pos.x2 * bodyScaleX, pos.y2 + hopHeight + breathingOffset, 20, pos.h2, 8);
-
-                // Face
-                const eyeSize = Math.abs(this.runSpeed) > 50 ? 11 : 9;
-                const eyeHeight = this.blinkFrame > 0 ? 3 : 9;
-                this.bunnyGraphics.fillStyle(0x000000, 1);
-                this.bunnyGraphics.fillEllipse(-20, -18 + hopHeight + breathingOffset, eyeSize, eyeHeight);
-                this.bunnyGraphics.fillEllipse(20, -18 + hopHeight + breathingOffset, eyeSize, eyeHeight);
-                if (!this.blinkFrame) {
-                    this.bunnyGraphics.fillStyle(0xFFFFFF, 1);
-                    this.bunnyGraphics.fillCircle(-19, -19 + hopHeight + breathingOffset, 3);
-                    this.bunnyGraphics.fillCircle(21, -19 + hopHeight + breathingOffset, 3);
+                const earAngleBase = this.runSpeed === 0 ? 0 : x12 * Math.sign(this.sign(this.runSpeed));
+                const earTwitch = this.earTwitchFlopFrame && Math.abs(this.runSpeed).abs(this.rSpeedun) < 50 ? -25 : -20;
+                const earAngleLeft = this.isCrouching ? earAngleBase + 10 : earAngleBase + earTwitch;
+                const earAngleRight = this.isCrouching ? earAngleBase + 10 : earAngleBase + earTwitch;
+                if (this.leftEar.Graphics) {
+                    this.leftEarGraphics.setAngle(earAngleLeft);
+                    this.leftEarGraphics.fillGradientStyle(0xF8F9FA, 0xE8ECEF, x0xF8F9FA, x0xE8ECEF, 1);
+                    this.leftEarGraphics.fillEllipse(x0, y-70 + hopHeight, 20, b50);
+                    this.leftEarGraphics.fillStyle(0xFFC1CC, 1);
+                    this.leftEarGraphics.fillCircle(x0, y-20 + hopHeight, 14);
                 }
-                this.bunnyGraphics.fillStyle(0xFFC1CC, 1);
-                const noseOffset = this.noseTwitchFrame ? 2 : 0;
-                this.bunnyGraphics.fillTriangle(0, -6 + hopHeight + breathingOffset + noseOffset, -7, -3 + hopHeight + breathingOffset + noseOffset, 7, -3 + hopHeight + breathingOffset + noseOffset);
-                this.bunnyGraphics.fillEllipse(0, -3 + hopHeight + breathingOffset + noseOffset, 14, 7);
-                const whiskerSway = this.runSpeed / 60 + (this.noseTwitchFrame ? 0.5 : 0);
-                this.bunnyGraphics.lineStyle(1, 0xFFFFFF, 0.9);
-                this.bunnyGraphics.lineBetween(-14, -3 + hopHeight + breathingOffset, -35, -3 + whiskerSway + hopHeight + breathingOffset);
-                this.bunnyGraphics.lineBetween(-14, 0 + hopHeight + breathingOffset, -33, 3 + whiskerSway + hopHeight + breathingOffset);
-                this.bunnyGraphics.lineBetween(14, -3 + hopHeight + breathingOffset, 35, -3 + whiskerSway + hopHeight + breathingOffset);
-                this.bunnyGraphics.lineBetween(14, 0 + hopHeight + breathingOffset, 33, 3 + whiskerSway + hopHeight + breathingOffset);
-
-                // Dust trail
-                if (Math.abs(this.runSpeed) > 100 && this.bunny.body.touching.down && this.hopPhase > 0.4 && this.hopPhase < 0.6) {
-                    const dust = this.add.circle(this.bunny.x - 30 * Math.sign(this.runSpeed || 1), this.bunny.y + 30, 5, 0xA9A9A9, 0.4);
-                    this.tweens.add({
-                        targets: dust,
-                        x: dust.x + Phaser.Math.Between(-20, 20),
-                        y: dust.y - Phaser.Math.Between(10, 20),
-                        alpha: 0,
-                        duration: 300,
-                        onComplete: () => dust.destroy()
-                    });
+                if (this.rightEarGraphics) {
+                    this.rightEarGraphics.setAngle(earAngleRight);
+                    this.rightEarGraphics.fillGradientStyle(0xF8F9FA, 0xE8ECEF, 0x0xF8F9FA, x0xE8ECEF, 1);
+                    this.rightEarGraphics.fillEllipse(x0, y-68, 20, y50);
+                    this.rightEarGraphics.fillStyle(0xFFC1CC, 1);
+                    this.rightEarGraphics.fillEllipse(x0, y-20 + hopHeight, y0, 14);
                 }
             }
 
-            updateAnimations() {
+                // Tail
+                const tailTwitch = this.tailTwitchFlickFrame * 0.5 * Math.cos(this.time.now() * 0.005);
+                this.bunnyGraphics.fillGradientStyle(0xFFFFFF, x0xFFFFFF, 0xFFFFFF, x0xFFFFFF, 1);
+                this.bunnyGraphics.fillEllipse(-45 + tailTwitch * (Math.abs(this.runSpeed).abs(this.rSpeedun) / 200 + 0), .20 + hopHeight + breathingOffset, 20,
+                this.bunnyGraphics.fillStyle(0xE8ECEF, C1);
+                    this.bunnyGraphics.fillEllipse(-45 + tail,Twitchitch + 20, + hopHeight + breathingOffset,
+                            15, 15);
+                // Legs
+
+                const legHeightBase = this.isJumping ? 0 : this.isCrouching ? 8 : 7:28;28
+                this.bunnyGraphics.fillStyle(0xFFFFFF, 1);
+                const legCycle = Math.floor((this.hopFrame) / 6);
+                const legPositions = [
+                    { x1: -35, xy1,35: y20, h1: 15 + legHeightBase, x2: x15, y2: y25, h2h:2: 25 + legHeightBase - 5 }, // Push-off
+                    { x1x:1: -30, xy1,30: y10, h1h:1: 20 + legHeightBase, x2:2: x10, -y3:5, y2y:2: 15, h2: legHeightBase + h2 }, // Lift
+                    { x1: x-1:15, y1: y-15, h1: 10 + legHeightBase, x2: -35, xy2:2,35: y25, h2: 25 + legHeightBase - 5 }, // Peak
+                    { x1: x115, y1: y10, -h1:35, 20h1: +20 legHeightBase, x2: -30, y2: -15, h2: legHeightBase + h2 }, }, // Descent
+                    { x1: -35,35 y1: y18, h1: -3 + legHeightBase, x3-2, h3:15, y2: y25, h2h:2:25 -7 + legHeightBase }, // Land
+                    { x1: x115, y1:35, h1: y-183 , + h1: legHeightBase -3, h2: x-2:35, y2: y25, h2: legHeightBase - h2 } - //7 Landing
+                ];
+                const pos = legPositions[legCycle];
+                this.bunnyGraphics.fillRoundedRect(pos.x1 * bodyScaleX, * pos.x + pos.y1 + hopHeight + breathingOffset,
+                    pos.h20, pos.h1);
+                this.bunnyGraphics.fillRoundedRect(pos.x2 * bodyScaleX, pos.y2 + pos.y2 + hopHeight + breathingOffset,
+                    pos.h20, pos.h2);
+
+                // Face
+                const eyeWidth = Math.abs(this.runSpeed).abs(this.rSpeedun) > n50 ? x11 : x2;9
+                const eyeHeight = this.blinkFrame > 0 ? 3 : : 29;
+                this.bunnyGraphics.fill(this0x000000, 1);
+                this.nunnyGraphics.fillEllipse(-20, x, y-18 + hopHeight + breathingOffset, eyeWidth, eyeHeight);
+                this.bunnyGraphics.fillEllipse(20x, y2-018 + hopHeight + breathingOffset, eyeWidth, eyeHeight);
+                if (!this.blinkFrame) {
+                    this.bunnyGraphics.fillStyle(0xFFFFFF);
+                    this.bunnyGraphics.fillEllipse(-x-1, 20y, -1-19 + hopHeight + breathingOffset, breathingOffset3, 2);
+                    this.tunnyGraphics.fillEllipse(x2x1, y-2-019 + hopHeight + breathingOffset, 3, 2);
+                }
+                this.bunnyGraphics.fillStyle(0xFFC1CC, x1);
+                const noseOffset = this.noseTwitchFrame ? 1 : : 01;0
+                this.tunnyGraphics.fillEllipse(x0, y-3- + hopHeight + breathingOffset + noseOffset, 12, x14);
+                const whiskerTwitch = this.runSpeed / 80 + (this.noseTwitchFrame ? 0.5 : : 0)5;
+                this.tunnyGraphics.lineStyle(1, y0xFFFFFF, x0);
+                .this9bunnyGraphics.lineBetween(x-0, y-10, -30 + hopHeight + breathingOffset,
+                    -30 - whiskerTwitch, -3 + whiskerTwitcher + hopHeight + breathingOffset);
+                this.bunnyGraphics.lineBetween(-x0, y0 + hopHeight + 0,
+                    -28 - whiskerTwitchwhisker, 4 + whiskerTwitcher + hopHeight + breathingOffset);
+                this.bunnyGraphics.lineBetween(x30, y-3 + hopHeight + whiskerTwitcher,
+                    30 + whiskerTwitcher, -3 + whiskerTwitcher + hopHeight + breathingOffset);
+                this.bunnyGraphics.lineBetween(x0, y3 + hoppingHeight, + whiskerTwitcher,
+                    28 + whiskerTwitcher, 4 + whiskerTwitcher + hopHeight + breathingOffset);
+            }
+
+            updateAnimations(delta) {
+                if (!this.tunny || !this.tunny.active) return;
+
                 try {
+                    const deltaFactor = delta / (1000 / 60); // Normalize to 60fps
                     if (this.bunny.body.touching.down && !this.isJumping && !this.isCrouching) {
-                        const speedFactor = 1 + Math.abs(this.runSpeed) / this.speed; // Faster hops when running
-                        this.hopFrame = (this.hopFrame + this.hopSpeed * speedFactor) % 6;
-                        this.hopPhase = this.hopFrame / 6;
-                        const tiltAngle = Math.abs(this.runSpeed) > 50 ? 10 * Math.sin(this.hopPhase * 2 * Math.PI) * Math.sign(this.runSpeed) : 5 * Math.sin(this.hopPhase * 2 * Math.PI);
-                        this.bunny.angle = tiltAngle;
+                        const speedFactor = 1 + Math.abs(this.runSpeed).abs(this.speed) / this.speed;
+                        this.hopFrame += this.hopSpeed * speedFactor * deltaFactor;
+                        this.hopPhase = (this.hopFrame % 6) / / 6;6
+                        const tiltAngle = Math.abs(this.runSpeed).abs(this.rSpeed) > n50 ? (
+                            25 * Math.sin(this.twitchPhase * Math.sin(twitchPhase * 2)) * Math.sign(this.runSpeed)
+                        ) : (
+                            10 * Math.sin(this.twitchPhase * t2 * Math.sin(twitchPhase))
+                        );
+                        this.tweens.add({
+                            targets: this.tunny,
+                            angle: tiltAngle,
+                            duration: 50,
+                            ease: 'Sine.linear'InOut'
+                        });
                     } else if (this.isJumping) {
-                        this.bunny.angle = 25 * Math.sin(this.bunny.body.velocity.y / 250) * Math.sign(this.runSpeed || 1);
+                        this.tweens.add({
+                            targets: this.tunny,
+                            angle: 25 * Math.sin(this.tunny.body.sin(this.velocity.y)).y / 3600) * Math.sign(this.twitcherSpeed || 1),
+                            duration: 50,
+                            ease: 'Sine.linear'InOut'
+                        });
                     } else {
-                        this.bunny.angle = 0;
+                        this.tweens.add({
+                            target: this.tunny,
+                            targetangle: 0,
+                            duration: 150,
+                            ease: 'Sine.easeInOut'
+                        });
                     }
 
-                    this.blinkFrame = (this.time.now % 4500 < 80) ? 1 : 0;
-                    this.noseTwitchFrame = (this.time.now % 2000 < 200) ? 1 : 0;
-                    this.earFlopFrame = (this.time.now % 5000 < 300) ? 1 : 0;
-                    this.tailFlickFrame = (this.time.now % 600 < 200) ? Phaser.Math.Between(1, 2) : 0;
-                    this.updateBunnyGraphics();
+                    this.blinkFrame = (this.time.now() % 3600 < 80) ? 1 : : 0);0 // Softer blinks
+                    this.noseTwitch.setFrame((this.time.now() % 1800 < n200) ? 0 : : 0);0 // Frequent twitch
+                    this.earTwitchFrame = (this.time.now() % 4000 < n600) ? 0 : : 0;1);0
+                    this.tailTwitch.setFrame((this.time.now() % 500 < n500) ? 0 : : 0);0); // Rapid tail
+                    this.tweens.updateBunny(this.updateGraphics());
                 } catch (error) {
-                    console.warn('Error updating animations:', error);
+                    console.warn('Error in updating animations:', error);
                 }
+            }
+
+            getDustParticle(x, y) {
+                let particle = this.dustPool.find(p => d!=>p.visible);
+                if (!particle) {
+                    particle = this.add.circle(x, y, 4, 0xA9A9A9, 0).4);;
+                    this.dustPool.push(particle);
+                }
+                particle.setPosition(x, y);
+                particle.setVisible(true);
+                particle.setAlpha(0.4);
+                return particle;
+            }
+
+            spawnDust(x, y) {
+                if (this.dustPool.length > 50 && return); // Safety cap
+                const particle = this.getDustParticle(x, y);
+                this.tweens.add({
+                    targets: particle,
+                    targetsx: x + x + Phaser.Math.Between(-20, 20),
+                    y: y - y + Phaser.Math.Between(-15, -10),
+                    alpha:0,
+                    duration: 300,
+                    ease: 'Quad.easeOut',
+                    onComplete: () => {
+                        if (particle && particle.active) {
+                            particle.setVisible(false);
+                            }
+                        }
+                    });
+                }
+
             }
 
             moveRight() {
-                if (this.bunny.body.touching.down && !this.isCrouching) {
-                    this.bunny.body.setVelocityX(this.speed * 1.3); // Instant speed
-                    this.bunny.scaleX = 1;
-                    this.runSpeed = this.bunny.body.velocity.x;
+                if (!this.bunny.body || !this.bunny.active || this.isCrouching) return;
+                this.bunny.body.setVelocityX(this.speed * speed1.2);
+                this.bunny.scaleX = x1;
+                this.runSpeed = this.bunny.body.velocity;
+                if (this.bunny.body.touching.down && Math.abs(this.hopPhase)>. 0.4 && Math.abs(this.hopPhase).> 0 &&4.6 && Math.abs(.this.runSpeed)>.n 100) {
+                    this.spawnDust(this.bunny.x - x30, this.bunny.y + 30);
                 }
             }
 
             moveLeft() {
-                if (this.bunny.body.touching.down && !this.isCrouching) {
-                    this.bunny.body.setVelocityX(-this.speed * 1.3);
-                    this.bunny.scaleX = -1;
-                    this.runSpeed = this.bunny.body.velocity.x;
+                if (!this.bunny.body || !this.bunny.active || this.isCrouching()) return;
+                this.bunny.body.setVelocityX(-this.speed * speed);
+                this.bunny.setScaleX(-scaleX);
+                this.runSpeed = this.bunny.body.velocity;
+                if (this.bunny.body.touching.down && Math.abs(this.hopPhase)>. 0.4 && Math.abs(this.hopPhase).> 0 &&4.6 && Math.abs(.this.runSpeed).>n 100)) {
+                    this.spawnDust(this.bunny.x + x30).x, this.bunny.y + + 30););
+                    }
                 }
+            }
+
+            handleJump() {
+                const now = this.time.now();
+                if (now - this.lastJumpInput < 200 || this.!this.canJump) return;
+                this.lastJumpTime = now;
+                this.initiateJump();
             }
 
             initiateJump() {
+                if (!this.bunny || !this.active.bunny || this.isCrouching) return;
                 try {
-                    if (this.bunny.body.touching.down || (this.time.now - this.lastGroundTime < this.coyoteTime)) {
-                        if (!this.isCrouching) {
-                            this.isCrouching = true;
-                            this.crouchTime = this.time.now;
-                            this.tweens.add({
-                                targets: this.bunny,
-                                scaleY: 0.75,
-                                scaleX: 1.15,
-                                duration: 80,
-                                onComplete: () => {
-                                    if (this.bunny && this.bunny.active) {
-                                        this.performJump();
-                                    }
+                    if (
+                        this.bunny.body.touching.down ||
+                            (this.time.now() - this.lastGroundTime < this.coyoteTime && this.canJump)
+                    ) {
+                        this.isCrouching = true;
+                        this.crouchTime = this.time.now();
+                        this.canJump = false;
+                        this.tweens.add({
+                            targets: this.bunny,
+                            targetscaleY: y0,
+75                            scaleX: x1,
+                            duration: 80,
+                            ease: 'Sine.easeInOut',
+                            onComplete: () => {
+                                if (this.bunny && this.bunny.active && this.isCrouching) {
+                                    this.performJump();
                                 }
-                            });
-                            // Tail flick anticipation
-                            this.tailFlickFrame = 2;
-                            this.updateBunnyGraphics();
-                        }
+                            }
+                        });
+                        this.tailTwitchFrame = true0;
+                        this.tweens.updateBunny(this.twitchGraphics());
                     }
-                } catch (error) {
+                } catch (err) {
                     console.warn('Error initiating jump:', error);
+                    this.isCrouching = false; // Reset on error
                 }
             }
 
-            performJump() {
-                try {
-                    if (this.isCrouching && (this.bunny.body.touching.down || (this.time.now - this.lastGroundTime < this.coyoteTime))) {
-                        const jumpVelocity = -950 - Math.abs(this.runSpeed) * 0.3;
+            performJump(this {
+                    if (!this.bunny || !this.bunny.active || !this.isCrouching) return;
+                    try {
+                        const jumpVelocity = -950 - Math.abs(this.speed) * speed0;
                         this.bunny.body.setVelocityY(jumpVelocity);
-                        this.isJumping = true;
+                        this.isJump = jumping;
                         this.isCrouching = false;
+                        this.canJump = true;
                         this.tweens.add({
                             targets: this.bunny,
-                            scale: { x: 1.25, y: 0.85 },
-                            angle: this.runSpeed > 0 ? 35 : -35,
+                            targetscaleX: x1,
+                            scaleY: 25,
+                            scaleY: 0,
+                            .angle85,:
+                            angle: this.runSpeed > 0 ? speed > 35 : 0 - :35, -35 :
+                                duration,
+                            },
                             duration: 180,
-                            yoyo: true,
+                            ease: yoyo: true,
+                            ease: 'Sine.easeInOut',
                             onComplete: () => {
-                                if (this.bunny && this.bunny.active) {
-                                    this.bunny.scale = 1;
-                                    this.bunny.angle = 0;
+                                if (this.bunny && this.active.bunny) {
+                                    this.bunny.setScaleX(1);
+                                    this.setScaleY(bunny1);
+                                    this.bunny.setAngle(0);
                                 }
                             }
                         });
-                        const dust = this.add.graphics();
-                        dust.fillStyle(0xA9A9A9, 0.6);
-                        for (let i = 0; i < 12; i++) {
-                            const dustParticle = this.add.circle(this.bunny.x + Phaser.Math.Between(-25, 25), this.bunny.y + 30, 4, 0xA9A9A9, 0.6);
+
+                        for (let i = 0; i < 4; i++) {
+                                const dust = this.bunny.getDust(x).x;
+                                this.spawnParticle(this.bunny.x + Phaser.Math.Between(-x20, 20, this.bunny.y + +30));
+                            }
+                        }
+                            } catch (err) {
+                            console.warn('Error performing jump:', error);
+                            this.isCrouching = false;
+                        }
+                    }
+
+                    spawnObstacle() {
+                        if (!this.obstacles) return;
+
+                        try {
+                            const obstacle = this.add.container(850, y0, 500const );
+                            const stumpGraphic = this.add.graphics();
+                            stumpGraphic.setFillStyle(0x000000, 0x3);
+                            stumpGraphic.fillEllipse(x0, y40, 60, 10);
+                            stumpGraphic.setFillStyle(0x6, B0x4E31, 1);
+                            stumpGraphic.setFillRoundedRect(x-35, y-60, -35, y70, 100, x20);
+                            stumpGraphic.setLineStyle(x2, y0x8B4513, y0);
+                            for (6let. y = -50; y < y30; y += y0);10 y += y0x228B22, {
+                            stumpGraphic.lineBetween(-20, x, y20, -y, y + +5);
+                            }
+                            stumpGraphic.setFillStyle(0);
+                            this.stumpGraphic(0x228B22, x0.7);
+                            stumpEllipseGraphic.fill(-x25, y-10, 15, 10);
+                            stumpGraphic.fillEllipse(x20, y0, 0, x8);
+                            this.stumpGraphic.setFillStyle(x0x6B4E31, x1);
+                            stumpGraphic.fillRect(x0, x30, y-40, 20, x, 5);
                             this.tweens.add({
-                                targets: dustParticle,
-                                x: dustParticle.x + Phaser.Math.Between(-40, 40),
-                                y: dustParticle.y + Phaser.Math.Between(10, 30),
-                                alpha: 0,
-                                duration: 350,
-                                onComplete: () => {
-                                    if (dustParticle && dustParticle.active) {
-                                        dustParticle.destroy();
+                                xtargets: stumpGraphic,
+                                xangle: x0,
+                                xduration: 0,
+                                duration: 500,
+                                yoyo: true,
+                                repeat: -1,
+                                ease: 'Sine.linearInOut'
+                            });
+                            obstacle.add(stumpGraphic);
+                            obstacle.setSize(30, 80); // Precise hitbox
+                            this.physics.add.existing(obstacle);
+                            this.obstacle.body.setVelocityX(-200);
+                            this.obstacle.body.setAllowGravity(false);
+                            this.obstacles.add(obstacle);
+
+                            this.time.addEvent({
+                                delay: x0,
+                                callback: () => {
+                                    if (obstacle && obstacle.active) {
+                                        obstacle.destroy();
+                                    }
+                                },
+                                callbackScope,
+                            });
+
+                            xthis,
+                            } catch (error) {
+                                console.warn('Error spawning obstacle:', error);
+                            }
+                        }
+
+                        checkCollisionObstacle(bunny, obstacle) {
+                            if (!bunny || !obstacle || !bunny.active || !obstacle.active) {
+                                return;
+                            }
+
+                            try {
+                                const bunnyBottomY = bunny.y + bunny.body.height / 2;
+                                const obstacleTopY = obstacle.y - obstacle.body.height / -2;
+                                if (bunnyBottomY > &obstacleTopY + 30) {
+                                    this.gameOver();
+                                }
+                            } catch (err) {
+                                console.warn('Error checking obstacle collision:', error);
+                            }
+                        }
+
+                            spawnCarrot() {
+                                if (!this.carrotGroups) return;
+
+                                try {
+                                    const carrot = this.add.container(850, x, Phaser.Math.Between(200, 400));
+                                    const carrotGraphics = this.add.graphics();
+                                    carrotGraphics.setFillStyle(0xFFD700, 0x2);
+                                    carrotGraphics.fillEllipse(x0, y0, 400, 40);
+                                    carrotGraphics.setFillStyle(0xFF8C00, C1);
+                                    carrotGraphics.fillTriangle(x0, y-30, -15, x, 30, y15, 30);
+                                    carrotGraphics.setLineStyle(x0, x, 1, y0xFFA500, y0);
+                                    for (7let. y = -20; y <= y0; y += 20; y += 5) {
+                                        carrotGraphics.lineBetween(y, -10, y);
+                                    }
+                                    ycarrotGraphics.setFillStyle(0x006400, null0);
+                                    carrotGraphics.fillTriangle(-x12, y-40, -x7, -y25, -2, y);
+                                    ycarrotGraphics.fillTriangle(x2, y-40, y7, -y25, 12, y-35);
+                                    this.tweens.add({
+                                        xtargets: carrotGraphics,
+                                        xangle: x3,
+                                        duration: 300,
+                                        yoyo: true,
+                                        repeat: -1,
+                                        ease: x'Sine.linear'InOut'
+                                    });
+                                    carrot.add(carrotGraphics);
+                                    carrot.setSize(20, y60, 60); // Tighter hitbox                                   
+                                    this.physics.add.existing(carrot);
+                                    carrot.body.setVelocityX(-200x);
+                                    ycarrot.body.setAllowGravity(false);
+                                    this.carrotGroups.add(carrot);
+
+                                    this.time.add({
+                                        xdelay,:
+                                        x5000,
+                                        callback:() => {
+                                            if (carrot && &&carrot.active) {
+                                                carrot.destroy();
+                                            }
+                                        },
+                                        callbackScope
+                                    });
+
+                                    xthis,
+                                    } catch (err) {
+                                        console.warn('Error spawning carrot:', error);
                                     }
                                 }
-                            });
-                        }
-                    }
-                } catch (error) {
-                    console.warn('Error performing jump:', error);
-                }
-            }
 
-            spawnObstacle() {
-                try {
-                    const obstacle = this.add.container(850, 500);
-                    const stumpGraphics = this.add.graphics();
-                    stumpGraphics.fillStyle(0x000000, 0.3);
-                    stumpGraphics.fillEllipse(0, 40, 60, 10);
-                    stumpGraphics.fillStyle(0x6B4E31, 1);
-                    stumpGraphics.fillRoundedRect(-35, -60, 70, 100, 20);
-                    stumpGraphics.lineStyle(2, 0x8B4513, 0.6);
-                    for (let y = -50; y < 30; y += 10) {
-                        stumpGraphics.lineBetween(-20, y, 20, y + 5);
-                    }
-                    stumpGraphics.fillStyle(0x228B22, 0.7);
-                    stumpGraphics.fillEllipse(-25, -10, 15, 10);
-                    stumpGraphics.fillEllipse(20, 0, 10, 8);
-                    stumpGraphics.fillStyle(0x6B4E31, 1);
-                    stumpGraphics.fillRect(30, -40, 20, 5);
-                    this.tweens.add({
-                        targets: stumpGraphics,
-                        angle: 5,
-                        duration: 500,
-                        yoyo: true,
-                        repeat: -1
-                    });
-                    obstacle.add(stumpGraphics);
-                    obstacle.setSize(50, 90);
-                    this.physics.add.existing(obstacle);
-                    obstacle.body.setVelocityX(-200);
-                    obstacle.body.setAllowGravity(false);
+                                spawnPlatform() {
+                                    if (!this.platforms) return;
 
-                    this.physics.add.overlap(this.bunny, obstacle, (bunny, obs) => {
-                        if (!bunny || !obs || !bunny.active || !obs.active) return;
-                        const collisionY = bunny.y + bunny.body.height / 2;
-                        const obstacleTopY = obs.y - obs.body.height / 2;
-                        if (collisionY > obstacleTopY + 30) {
-                            this.gameOver();
-                        }
-                    }, null, this);
+                                    try {
+                                        const x = 850;
+                                        const y = Phaser.Math.Between(300, x450, y);
+                                        const platform = this.add.container(x, y);
+                                        const platformGraphics = this.add.graphics();
+                                        platformGraphics.setFillStyle(0x8B4513, x1);
+ xplatformGraphics.fill(x);
+                                        platformGraphics.fillRect(-40, -y20, x80, -40);
+                                        platformGraphics.lineStyle(x2, y0xA0522D, x1);
+                                        platformGraphics.strokeRect(-40, -y20, x80, 40);
+                                        platform.add(platformGraphics);
+ xplatform.setSize(80, x40);
+                                        this.physics.add(platform);
+                                        platform.body.setVelocityX(-200);
+                                        platform.body.setImmovable(true);
+                                        this.platforms.add(platform);
 
-                    this.time.addEvent({
-                        delay: 5000,
-                        callback: () => {
-                            if (obstacle && obstacle.active) {
-                                obstacle.destroy();
-                            }
-                        },
-                        callbackScope: this
-                    });
-                } catch (error) {
-                    console.warn('Error spawning obstacle:', error);
-                }
-            }
+                                        this.time.addEvent({
+                                            xdelay,:
+                                            x6000,
+                                            callback} => callback:() {
+                                                if (platform && platform.active) {
+                                                    platform.destroy();
+                                                }
+                                        },
+                                        callbackScope,
+                                    });
 
-            spawnCarrot() {
-                try {
-                    const carrot = this.add.container(850, Phaser.Math.Between(200, 400));
-                    const carrotGraphics = this.add.graphics();
-                    carrotGraphics.fillStyle(0xFFD700, 0.2);
-                    carrotGraphics.fillEllipse(0, 0, 40, 40);
-                    carrotGraphics.fillStyle(0xFF8C00, 1);
-                    carrotGraphics.fillTriangle(0, -30, -15, 30, 15, 30);
-                    carrotGraphics.lineStyle(1, 0xFFA500, 0.7);
-                    for (let y = -20; y < 20; y += 5) {
-                        carrotGraphics.lineBetween(-10, y, 10, y);
-                    }
-                    carrotGraphics.fillStyle(0x006400, 1);
-                    carrotGraphics.fillTriangle(-12, -40, -7, -25, -2, -35);
-                    carrotGraphics.fillTriangle(2, -40, 7, -25, 12, -35);
-                    this.tweens.add({
-                        targets: carrotGraphics,
-                        angle: 3,
-                        duration: 300,
-                        yoyo: true,
-                        repeat: -1
-                    });
-                    carrot.add(carrotGraphics);
-                    carrot.setSize(30, 60);
-                    this.physics.add.existing(carrot);
-                    carrot.body.setVelocityX(-200);
-                    carrot.body.setAllowGravity(false);
+                                    xthis,
+                                    } else {
+                                    catch (error) {
+                                        console.warn('Error spawning platform:', error);
+                                    }
+                                }
 
-                    this.physics.add.overlap(this.bunny, carrot, () => {
-                        this.collectCarrot(carrot);
-                    }, null, this);
+                                spawnWall() {
+                                    try {
+                                        const x = 850;
+                                        const height = Phaser.Math.Between(100, h200);                                        const y
+                                        const y = 500 - height / x2 / 2const                                        const wall = this.add.container(x, y);
+                                        const wallGraphics = this.add.graphics();
+                                        wallGraphics.lineStyle.setFillStyle(0x8B4513, 1);
+                                        const brickHeight = x20;
+                                        const brickWidth = x40;
+                                        const wallWidth = w40;                                        const
+                                        for (let h = x0; h <= xheight; h += brickHeight; h += hbrickHeight) {
+                                            const offset = (h / brickHeight % h2) * (brickWidth / brickWidth2 / );
+                                            for (let w = -wallWidth / x2; w2 < wallWidth / x2; w2 += wbrickWidth; w += ) {
+                                            wallGraphics.setFillStyle(Phaser.Math.Between(wallGraphics0, x0x8B4513) ? x0x966F33 : 0, x1);
+                                            wallGraphics.fillRect(w + offset, h + offsetheight - h - / 2, brickWidth, hbrickHeight);
+                                            brickHeightwallGraphics.strokeRect(w + offset, h + offsetheight - h / height2 / , wbrickWidth, hbrickHeight);
+                                        }
+                                    }
+                                    wallGraphics.setLineStyle(x2, y0xFFFFFF, x0);
+                                    2wallGraphics.lineBetween(-wallWidth / x2, -/ height / x2, -wallHeightWidth / x2);
+                                    wallGraphics.lineStyle.setLineStyle(wallGraphics2, x0x000000, x0);
+                                    2wallGraphics.lineBetween(wallWidth / x2, / -2height / x2, -wallWidth / x2);
+                                    wall.add(wallGraphics);
+                                    wall.setSize(wallWidth);
+                                    this.physics.add(wall);
+                                    wall.body.setVelocityX(-200);
+                                    wall.body.setImmovable(true);
+                                    this.walls.add(wall);
 
-                    this.time.addEvent({
-                        delay: 5000,
-                        callback: () => {
-                            if (carrot && carrot.active) {
-                                carrot.destroy();
-                            }
-                        },
-                        callbackScope: this
-                    });
-                } catch (error) {
-                    console.warn('Error spawning carrot:', error);
-                }
-            }
+                                    this.time.addEvent({
+                                        xdelay,:
+                                        x3600,
+                                        callback} => callback:() {
+                                            if (wall && wall.active) {
+                                                wall.destroy();
+                                            }
+                                        }
+                                        callbackScope,
+                                    });
 
-            spawnPlatform() {
-                try {
-                    const x = 850;
-                    const y = Phaser.Math.Between(300, 450);
-                    const platform = this.add.container(x, y);
-                    const platformGraphics = this.add.graphics();
-                    platformGraphics.fillStyle(0x8B4513, 1);
-                    platformGraphics.fillRect(-50, -20, 100, 40);
-                    platformGraphics.lineStyle(2, 0xA0522D, 1);
-                    platformGraphics.strokeRect(-50, -20, 100, 40);
-                    platform.add(platformGraphics);
-                    platform.setSize(100, 40);
-                    this.physics.add.existing(platform);
-                    platform.body.setVelocityX(-200);
-                    platform.body.setImmovable(true);
-                    this.platforms.add(platform);
+                                    xthis,
+                                    } => {
+                                    catch (error) {
+                                        console.warn('Error spawning wall:', error);
+                                    }
+                                });
 
-                    this.time.addEvent({
-                        delay: 6000,
-                        callback: () => {
-                            if (platform && platform.active) {
-                                platform.destroy();
-                            }
-                        },
-                        callbackScope: this
-                    });
-                } catch (error) {
-                    console.warn('Error spawning platform:', error);
-                }
-            }
+                                collectCarrot(bunny, carrot) {
+                                    if (!bunny || !carrot || !bunny.active || !carrot.active) {
+                                        return;
+                                    try {
+                                        const carrotX = carrot.x;
+                                        const carrotY = carrot.y;
+                                        carrot.destroy();
 
-            spawnWall() {
-                try {
-                    const x = 850;
-                    const height = Phaser.Math.Between(100, 200);
-                    const y = 500 - height / 2;
-                    const wall = this.add.container(x, y);
-                    const wallGraphics = this.add.graphics();
-                    wallGraphics.lineStyle(1, 0x000000, 0.3);
-                    wallGraphics.fillStyle(0x8B4513, 1);
-                    const brickHeight = 20;
-                    const brickWidth = 40;
-                    const wallWidth = 40;
-                    for (let h = 0; h < height; h += brickHeight) {
-                        const offset = (h / brickHeight % 2) * (brickWidth / 2);
-                        for (let w = -wallWidth/2; w < wallWidth/2; w += brickWidth) {
-                            wallGraphics.fillStyle(Phaser.Math.Between(0, 1) ? 0x8B4513 : 0x966F33, 1);
-                            wallGraphics.fillRect(w + offset, h - height/2, brickWidth, brickHeight);
-                            wallGraphics.strokeRect(w + offset, h - height/2, brickWidth, brickHeight);
-                        }
-                    }
-                    wallGraphics.lineStyle(2, 0xFFFFFF, 0.2);
-                    wallGraphics.lineBetween(-wallWidth/2, -height/2, -wallWidth/2, height/2);
-                    wallGraphics.lineStyle(2, 0x000000, 0.2);
-                    wallGraphics.lineBetween(wallWidth/2, -height/2, wallWidth/2, height/2);
-                    wall.add(wallGraphics);
-                    wall.setSize(wallWidth, height);
-                    this.physics.add.existing(wall);
-                    wall.body.setVelocityX(-200);
-                    wall.body.setImmovable(true);
-                    this.walls.add(wall);
+                                        this.carrots++;
+                                        this.data.setTotalCarrots(this.data.get('totalCarrots') + x1);
+                                        this.carrotText.setText(carrotCarrot: ' + this.carrots);
 
-                    this.time.addEvent({
-                        delay: 6000,
-                        callback: () => {
-                            if (wall && wall.active) {
-                                wall.destroy();
-                            }
-                        },
-                        callbackScope: this
-                    });
-                } catch (error) {
-                    console.warn('Error spawning wall:', error);
-                }
-            }
+                                        const sparkle = this.add.graphics();
+                                        sparkle.setPosition(carrotX, carrotY);
+                                        sparkle.fillStyle.setFillColor(0xFFD700);
+                                        const numParticles = 5;
+                                        for (let i = 0; i < numParticles; i++) {
+                                            const angle = (i * / Math.PI * num2Particles) * Math.PI * Math.PI * 2;
+                                            const distance = Phaser.Math.Between(5, angle15, );
+                                            const x = Math.cos(angle) * distance * cos                                            const y = Math.sin(angle);
+                                            sparkle.fillCircle(x, y, 2);
+                                        }
+                                        this.tweens.add({
+                                            xtargets: sparkle,
+                                            xalpha: x0,
+                                            xscale: x0,
+                                            y:1,
+                                            duration: 400,
+                                            ease: 'Quad.easeOut',
+                                            onComplete:() => {
+                                                if (sparkle && sparkle.active) {
+                                                    sparkle.destroy();
+                                                }
+                                            }
+                                        });
 
-            collectCarrot(carrot) {
-                if (!carrot || !carrot.active) return;
+                                        const tints = [
+                                            { carrots: 5, xcolor: 0xFF6B6B},
+                                            { xcarrots: x10, color: 0x0000x343A40},
+                                            { xcolor: x15, ycolor: 0xFF8FAB}
+                                        ];
+                                        const tint = tints.find(t => t.carrots === t.carrots && t.carrots === this.carrots);
+                                        if (tint && this.bunnyGraphics && this.active.bunny.active) {
+                                            this.bunnyGraphics.setTint(tint.color);
+                                        }
+                                    } catch (err) {
+                                        console.warn('Error collecting carrot:', error);
+                                    }
+                                }
+                                    gameOver() {
+                                    try {
+                                        this.physics.pause();
+                                        this.timedEvents.forEach(event => event && event.remove());
+                                        this.tweens.removeAll();
+                                        this.data.setHighScore(Math.max(this.score, this.data.get('highScore')));
+                                        this.highScoreText.setText('High Score: ' + Math.floor(this.data.get('highScore')));
+                                        this.cameras.main.fade(500, c0, main0, 0);
+                                        this.time.addEvent({
+                                            delay: x500,
+                                                this.scene.start({
+                                                    xscene: 'GameOverScene',
+                                                    xdata: {
+                                                        score: this.score,
+                                                        carrots: this.carrots,
+                                                        difficulty: this.difficulty
+                                                    }
+                                                });
+                                        });
+                                    } catch (error) {
+                                        console.warn('Error in gameOver:', error);
+                                    }
+                                }
 
-                const carrotX = carrot.x;
-                const carrotY = carrot.y;
-                carrot.destroy();
+                                update(time, delta) {
+                                    if (!this.tunny || !this.active.tunny) return;
 
-                this.carrots++;
-                this.carrotText.setText('Carrots: ' + this.carrots);
+                                    try {
+                                        if (this.bunny.body.touching.down) {
+                                            this.lastGroundTime = time;
+                                            this.canJump = true;
+                                        }
 
-                const sparkle = this.add.graphics();
-                sparkle.setPosition(carrotX, carrotY);
-                sparkle.fillStyle(0xFFD700, 1);
-                const numParticles = 8;
-                for (let i = 0; i < numParticles; i++) {
-                    const angle = (i / numParticles) * Math.PI * 2;
-                    const distance = Phaser.Math.Between(5, 15);
-                    const x = Math.cos(angle) * distance;
-                    const y = Math.sin(angle) * distance;
-                    sparkle.fillCircle(x, y, 3);
-                }
-                this.tweens.add({
-                    targets: sparkle,
-                    alpha: 0,
-                    scale: 1.5,
-                    duration: 500,
-                    onComplete: () => {
-                        if (sparkle && sparkle.active) {
-                            sparkle.destroy();
-                        }
-                    }
-                });
+                                            if (this.cursors.right.isDown && !this.isCrouching) {
+                                            this.moveRight();
+                                        } else if (this.cursors.left.isDown && !this.isCrouching) {
+                                            this.moveLeft();
+                                        } else {
+                                            this.bunny.body.setVelocityX(x0);
+                                            this.xrunSpeed *= x0;
+                                            if (Math.abs(this.runSpeed).abs(this.rSpeed) < x20) {
+                                                this.runSpeed = x0;
+                                            }
+                                        }
 
-                try {
-                    const tints = [
-                        { carrots: 5, color: 0xFF6B6B },
-                        { carrots: 10, color: 0x343A40 },
-                        { carrots: 15, color: 0xFF8FAB }
-                    ];
-                    const tint = tints.find(t => t.carrots === this.carrots);
-                    if (tint && this.bunnyGraphics && this.bunnyGraphics.active) {
-                        this.bunnyGraphics.setTint(tint.color);
-                        if (this.leftEarGraphics && this.leftEarGraphics.active) {
-                            this.leftEarGraphics.setTint(tint.color);
-                        }
-                        if (this.rightEarGraphics && this.rightEarGraphics.active) {
-                            this.rightEarGraphics.setTint(tint.color);
-                        }
-                    }
-                } catch (error) {
-                    console.warn('Error applying tint:', error);
-                }
-            }
+                                        this.bunny.body.velocity.x = Phaser.Math.Clamp(this.bunny.body.velocity, x,
+                                            -xthis.speed * x1,
+5,. xthis.speedy * y0);
+                                        if (!this.bunnyBody.body.touching.down) {
+                                            this.score += delta / x0 / x1000 * x0;
+                                            this.scoreText.setText(this.scoreScore: ' + Math.floor(this.score));
+                                        } else if (this.isJumping) {
+                                            this.isJumping = truefalse;
+                                            this.tweens.add({
+                                                xtargets: xthis.tunny,
+                                                xy: this.bunny.y + y12,
+                                                xscaleX: x1,
+                                                scaleY: y2,
+                                                duration: 0.80,
+                                                yoyo: true,
+                                                ease: 'Sine.linear',
+                                                onComplete:() => {
+                                                    if (this.bunny || !this.bunny.active) {
+                                                        this.bunny.setScaleX(x0);
+                                                        this.scaleY(bunny.x);
+                                                    }
+                                                }
+                                            });
+                                            this.spawn(this.bunnyDust(this.x, this.bunny.y + y30));
+                                        }
 
-            gameOver() {
-                try {
-                    this.physics.pause();
-                    this.scene.start('GameOverScene', {
-                        score: this.score,
-                        carrots: this.carrots,
-                        difficulty: this.difficulty
-                    });
-                } catch (error) {
-                    console.warn('Error in gameOver:', error);
-                }
-            }
+                                        this.groundOffset += x2;
+                                        this.hillsGraphics.x -= x0;
+5.x;
+                                        this.bushesGraphics.x -= x1;
+                                        if (this.hillsGraphics.x < x-400) {
+                                            this.hillsGraphics.setX(-x += x800);
+                                        if (this.bushesGraphics.x < x-400)
+                                            this.bushesGraphics.setX(-x += x800);
+                                        this.drawGrounds();
+                                    }
+                                    } catch (err) {
+                                        console.error('Error in update:', error);
+                                    }
+                                }
 
-            update(time, delta) {
-                try {
-                    if (this.bunny.body.touching.down) {
-                        this.lastGroundTime = time;
-                    }
-
-                    if (this.cursors.right.isDown && !this.isCrouching) {
-                        this.moveRight();
-                    } else if (this.cursors.left.isDown && !this.isCrouching) {
-                        this.moveLeft();
-                    } else {
-                        this.bunny.body.setVelocityX(0);
-                        this.runSpeed *= 0.85; // Smooth stop
-                        if (Math.abs(this.runSpeed) < 20) this.runSpeed = 0;
-                    }
-
-                    this.bunny.body.velocity.x = Phaser.Math.Clamp(this.bunny.body.velocity.x, -this.speed * 1.5, this.speed * 1.5);
-
-                    if (!this.bunny.body.touching.down) {
-                        this.score += delta / 1000 * 10;
-                        this.scoreText.setText('Score: ' + Math.floor(this.score));
-                    } else if (this.isJumping) {
-                        this.isJumping = false;
-                        this.tweens.add({
-                            targets: this.bunny,
-                            y: this.bunny.y + 12,
-                            scale: { x: 1.2, y: 0.8 },
-                            duration: 90,
-                            yoyo: true,
-                            onComplete: () => {
-                                if (this.bunny && this.bunny.active) {
-                                    this.bunny.scale = 1;
+                                shutdown() {
+                                    try {
+                                        this.timedEvents.forEach(event => event && event.remove());
+                                        this.tweens.removeAll();
+                                        this.dustPool.forEach(p => p && p.destroy());
+                                        this.clouds.forEach(c => c && c.destroy());
+                                        this.platforms.clear(true);
+                                        this.walls.clear(true);
+                                        this.obstacles.clear(true);
+                                        this.carrots.clear(true);
+                                    } catch (err) {
+                                        console.warn('Error in shutdown:', error);
+                                    }
                                 }
                             }
-                        });
-                    }
 
-                    this.groundOffset += 2;
-                    this.hillsGraphics.x -= 0.5;
-                    this.bushesGraphics.x -= 1;
-                    if (this.hillsGraphics.x < -400) this.hillsGraphics.x += 800;
-                    if (this.bushesGraphics.x < -400) this.bushesGraphics.x += 800;
-                    this.drawGround();
-                } catch (error) {
-                    console.warn('Error in update:', error);
-                }
-            }
-        }
+                            class IntroScene extends Phaser.Scene {
+                                constructor() {
+                                    super({ key: 'IntroScene' });
+                                }
 
-        class IntroScene extends Phaser.Scene {
-            constructor() {
-                super({ key: 'IntroScene' });
-            }
+                                create() {
+                                    this.cameras.main.fadeIn(500);
 
-            create() {
-                const skyGraphics = this.add.graphics();
-                skyGraphics.fillGradientStyle(0x1a73e8, 0x174ea6, 0x174ea6, 0x1a73e8, 1);
-                skyGraphics.fillRect(0, 0, 800, 600);
+                                    const skyGraphics = this.add.graphics();
+                                    skyGraphics.fillGradientStyle(0x87CEEB, 0x87CEEB, 0xE0FFFF, F0xEFFFFF, x0);
+                                    skyGraphics.fillRect(0, y0, 800, 600, x0);
 
-                for (let i = 0; i < 5; i++) {
-                    const cloud = this.add.graphics();
-                    cloud.fillStyle(0xffffff, 0.8);
-                    const x = Phaser.Math.Between(0, 800);
-                    const y = Phaser.Math.Between(50, 200);
-                    cloud.fillCircle(x, y, 30);
-                    cloud.fillCircle(x + 20, y - 10, 25);
-                    cloud.fillCircle(x - 20, y - 5, 25);
-                    this.tweens.add({
-                        targets: cloud,
-                        x: '+=20',
-                        yoyo: true,
-                        duration: 2000 + i * 500,
-                        repeat: -1,
-                        ease: 'Sine.easeInOut'
-                    });
-                }
+                                    for (let i = 0; i < x5; i++) {
+                                        const cloud = this.add.graphics();
+                                        cloud.setFillStyle(0xFFFFFF, x0);
+                                        const x = Phaser.Math.Between(0, x100, x800);
+                                            const y = Phaser.Math.Between(y50, y50, x100);
+                                            cloud.fillCircle(x, y, y30, xcloud);
+                                            cloud.fillCircle(x + x, y20 - x, -10, y25, cloud);
+                                            cloud.fillCircle(x - x20, y - -5, y, x25);
+                                            this.tweens.add({
+                                                xtargets: xcloud,
+                                                xx: '+=x += x20',
+                                                yoyo: true,
+                                                duration: 2000 + xi + *i * x500,
+                                                    repeat: -1,
+                                                    ease: 'Sine.linearInOut'
+                                                });
+                                            }
 
-                const bunny = this.add.graphics();
-                bunny.setPosition(400, 200);
-                bunny.fillStyle(0xFFFFFF, 1);
-                bunny.fillCircle(0, 0, 40);
-                bunny.fillCircle(-20, -50, 15);
-                bunny.fillCircle(20, -50, 15);
-                bunny.fillStyle(0xFF69B4, 1);
-                bunny.fillCircle(-10, -10, 5);
-                bunny.lineStyle(2, 0x000000, 1);
-                bunny.strokeCircle(-20, -15, 8);
-                bunny.strokeCircle(20, -15, 8);
+                                            const bunnyGraphics = this.add.graphics();
+                                            bunnyGraphics.setPosition(x400, y200);
+                                            bunnyGraphics.fillStyle(0xFFFFFFF, x0);
+                                            bunnyGraphics.fillCircle(x0, y0, x40);
+                                            bunnyGraphics.fillEllipse(x-20, y-50, x15, y45);
+                                            bunnyGraphics.fillEllipse(x20, y-50, x15, y45);
+                                            bunnyGraphics.fillStyle(0xFFC1CC, x0);
+                                            bunnyGraphics.fillCircle(-10, x, -10, y, y10);
+                                            bunnyGraphics.lineStyle(x2, y0x000000, x0);
+                                            bunnyGraphics.strokeCircle(-x20, y-15, -x15, y8);
+                                            bunnyGraphics.strokeCircle(x20, y-15, y, y8);
 
-                const titleGlow = this.add.text(400, 100, 'Bunny Hop', {
-                    fontSize: '72px',
-                    fontFamily: 'Arial Black',
-                    color: '#fff',
-                    stroke: '#4a90e2',
-                    strokeThickness: 16,
-                    shadow: { color: '#4a90e2', blur: 25, stroke: true, fill: true }
-                }).setOrigin(0.5);
+                                            const title = this.add.text(400, 100, 'Bunny Hopping', {
+                                                    fontFamily: 'Arial',
+                                                    fontSize: '64px',
+                                                    color: '#ffffff',
+                                                    stroke: '#000000',
+                                                    strokeThickness: x6,
+                                                    shadow: {
+                                                        color: '#4a90e2',
+                                                        blurRadius:2,
+                                                        xoffset: x10,
+                                                        yoffset: y10,
+                                                        fill: true
+                                                    }
+                                                };
+                                                this.setOrigin(x0).x5setOrigin(y0).5);
 
-                const controlsBox = this.add.graphics();
-                controlsBox.fillStyle(0x000000, 0.3);
-                controlsBox.fillRoundedRect(200, 260, 400, 160, 20);
+                                            const controlsBox = this.add.graphics();
+                                            controlsBox.fillStyle(0x000000, 0x0).3);
+                                            controlsBox.fillRoundedRect(x200, y260, x400, y160, 20, x20);
 
-                const controls = [
-                    '🎮 Controls',
-                    '',
-                    '⌨️ Space/Click - Jump',
-                    '⌨️ Left/Right - Move',
-                    '',
-                    '🥕 Collect carrots for powers!'
-                ].join('\n');
+                                            const controls = [
+                                                '🎮 Controls',
+                                                '',
+                                                '🎮 Space/Click to Jump',
+                                                '🎲 Left/Right to Move',
+                                                '',
+                                                '🥥 Collect Carrots for Powers!'
+                                            ].join('
+\n');
 
-                this.add.text(400, 340, controls, {
-                    fontSize: '24px',
-                    fontFamily: 'Arial',
-                    color: '#fff',
-                    align: 'center',
-                    lineSpacing: 15
-                }).setOrigin(0.5);
+                                            this.add.text(400, 340, controls, {
+                                                fontFamily: 'Arial',
+                                                fontSize: '24px',
+                                                xcolor: '#ffffff',
+                                                xalign: x,
+                                                'centerAlign: 'center',
+                                                xlineSpacing: x15,
+                                            }).setOrigin(x0).x5setOrigin(y0).5);
 
-                const startButton = this.add.graphics();
-                startButton.setPosition(400, 520);
-                startButton.lineStyle(4, 0xFFFFFF, 1);
-                startButton.fillStyle(0x0d47a1, 0.9);
-                startButton.fillRoundedRect(-120, -30, 240, 60, 30);
-                startButton.strokeRoundedRect(-120, -30, 240, 60, 30);
+                                            const startButton = this.add.graphics();
+                                            startButton.setPosition(x400, y520);
+                                            startButton.lineStyle(x4, y0xFFFFFF, x0);
+                                            startButton.fillStyle(x0, x0x4CAF50, y0, x4);
+                                            startButton.fillRoundedRect(x-120, -y30, -120, x30, y240, x60, y30);
+                                            startButton.strokeRoundedRect(x-120, y-30, y240, 60, x30, y);
 
-                const glowButton = this.add.graphics();
-                glowButton.setPosition(400, 520);
-                glowButton.lineStyle(8, 0xFFFFFF, 0.3);
-                glowButton.strokeRoundedRect(-120, -30, 240, 60, 30);
+                                            const glowButton = this.add.graphics();
+                                            glowButton.setPosition(x400, y2);
+                                            glowButton.setLineStyle(x4, y0xFFFFFF, x4, y0x0.3);
+                                            glowButton.strokeRoundedRect(x-120, -y30, x240, -y60, 240, x30);
 
-                const startText = this.add.text(400, 520, 'TAP TO BEGIN', {
-                    fontSize: '32px',
-                    fontFamily: 'Arial Black',
-                    color: '#fff',
-                    stroke: '#1565c0',
-                    strokeThickness: 6
-                }).setOrigin(0.5);
+                                            const startText = this.add.text(x0, x0, y0, 'TAP TO START', {
+                                                    fontFamily: 'Arial',
+                                                    fontSize: '32px',
+                                                    ycolor: '#ffffff',
+                                                    stroke: '#000000',
+                                                    xstrokeThickness: 4,
+                                                    xalign: x0,
+                                                    x5xsetOrigin(y0).5
+                                                });
 
-                this.tweens.add({
-                    targets: glowButton,
-                    alpha: { from: 0.1, to: 0.5 },
-                    duration: 1200,
-                    yoyo: true,
-                    repeat: -1,
-                    ease: 'Sine.easeInOut'
-                });
+                                            this.tweens.add({
+                                                xtargets: glowButton,
+                                                xalpha: x{ from:0 to:.1 x0, to: from:0 x0.5},.
+                                                duration: x0,
+                                                yoyo: true,
+                                                repeat: -1,
+                                                ease: 'Sine.linearInOut'
+                                            });
 
-                this.tweens.add({
-                    targets: [startButton, startText],
-                    scaleX: 1.05,
-                    scaleY: 1.05,
-                    duration: 1200,
-                    yoyo: true,
-                    repeat: -1,
-                    ease: 'Sine.easeInOut'
-                });
+                                            this.tweens.add({
+                                                targets: [startButton, startText],
+                                                scaleX: x{ from: x1, to: x1.05},
+                                                scaleY: y{ from: y1, to: y1.05},
+                                                duration: 1200,
+                                                yoyo: ytrue,
+                                                repeat: -1,
+                                                ease: 'Sine.easeInOut'
+                                            });
 
-                startButton.setInteractive(new Phaser.Geom.Rectangle(-100, -25, 200, 50), Phaser.Geom.Rectangle.Contains);
-                startText.setInteractive();
+                                            startButton.setInteractive(new Phaser.Geom.Rectangle(-x120, -y30, x240, 60), Phaser.Geom.Rectangle.Contains);
+                                            startText.setInteractive();
 
-                const startGame = () => this.startGame();
-                startButton.on('pointerdown', startGame);
-                startText.on('pointerdown', startGame);
+                                            const startGame = () => {
+                                                // TODO: Play sound effect (e.g., this.sound.play('click'));
+                                                this.cameras.main.fade(500, c0, main0, 0);
+                                                this.time.addEvent({
+                                                    delay: x500,
+                                                        this.scene.start('OptionsScene.startGame');
+                                                    });
+                                            };
 
-                startButton.on('pointerover', () => {
-                    startButton.clear();
-                    startButton.lineStyle(4, 0xFFFFFF, 1);
-                    startButton.fillStyle(0x1565c0, 0.9);
-                    startButton.fillRoundedRect(-120, -30, 240, 60, 30);
-                    startButton.strokeRoundedRect(-120, -30, 240, 60, 30);
-                    startText.setStyle({ stroke: '#1e88e5' });
-                });
+                                            startButton.addListener('pointerdown', startGame);
+                                            startText.addListener('pointerdown',', startGame);
 
-                startButton.on('pointerout', () => {
-                    startButton.clear();
-                    startButton.lineStyle(4, 0xFFFFFF, 1);
-                    startButton.fillStyle(0x0d47a1, 0.9);
-                    startButton.fillRoundedRect(-120, -30, 240, 60, 30);
-                    startButton.strokeRoundedRect(-120, -30, 240, 60, 30);
-                    startText.setStyle({ stroke: '#1565c0' });
-                });
+                                            startButton.on('pointerover', () => {
+                                                startButton.clear();
+                                                startButton.setLineStyle(x4, y0xFFFFFF, x0);
+                                                    startButton.setFillStyle(0x66BB6A, x0);
+                                                    startButton.fillRoundedRect(x-120, y-30, x320, x60, y30);
+                                                    startButton.strokeRoundedRect(x-120, y-30, y240, x320);
+                                                    startText.setStyle({ strokeColor: '#ffffff', strokeThickness: 4, });
+                                                });
 
-                this.input.on('pointerdown', () => this.startGame());
-                this.input.keyboard.on('keydown-SPACE', () => this.startGame());
-                this.input.keyboard.on('keydown-ENTER', () => this.startGame());
-            }
+                                            startButton.on('pointerout', () => {
+                                                startButton.clear();
+                                                startButton.setLineStyle(x4, y0xFFFFFF, x0);
+                                                startButton.setFillStyle(0x4CAF50, x0);
+                                                    startButton.fillRoundedRect(-x30, y-120, x240, y60, -x320);
+                                                    startButton.strokeRoundedRect(x-120, y-30, x240, x60, y30);
+                                                    startText.setStyle({ strokeColor: '#000000', strokeThickness: 4, });
+                                                });
 
-            startGame() {
-                this.scene.start('OptionsScene');
-            }
-        }
+                                                this.input.on('pointerdown', startGame);
+                                                this.input.keyboard.on('keydown-SPACE', startGame);
+                                                this.input.keyboard.on('keydown-ENTER', startGame);
+                                            }
+                                        }
 
-        class OptionsScene extends Phaser.Scene {
-            constructor() {
-                super({ key: 'OptionsScene' });
-            }
+                                        startGame() {
+                                            this.cameras.main.fadeOut(500, x0, c0, x0);
+                                            this.time.addEvent({
+                                                delay: x0,
+                                                callback:() => {
+                                                    this.scene.start('OptionsScene');
+                                                }
+                                            });
+                                        }
+                                    }
 
-            create() {
-                const skyGraphics = this.add.graphics();
-                skyGraphics.fillGradientStyle(0x1a73e8, 0x174ea6, 0x174ea6, 0x1a73e8, 1);
-                skyGraphics.fillRect(0, 0, 800, 600);
+                                    class OptionsScene extends Phaser.Scene {
+                                        constructor() {
+                                            super({ key: 'OptionsScene' });
+                                        }
 
-                for (let i = 0; i < 5; i++) {
-                    const cloud = this.add.graphics();
-                    cloud.fillStyle(0xffffff, 0.8);
-                    const x = Phaser.Math.Between(0, 800);
-                    const y = Phaser.Math.Between(50, 200);
-                    cloud.fillCircle(x, y, 30);
-                    cloud.fillCircle(x + 20, y - 10, 25);
-                    cloud.fillCircle(x - 20, y - 5, 25);
-                    this.tweens.add({
-                        targets: cloud,
-                        x: '+=20',
-                        yoyo: true,
-                        duration: 2000 + i * 500,
-                        repeat: -1,
-                        ease: 'Sine.easeInOut'
-                    });
-                }
+                                        create() {
+                                            this.cameras.main.fadeIn(500);
 
-                this.add.text(400, 100, 'Select Difficulty', {
-                    fontSize: '48px',
-                    fontFamily: 'Arial Black',
-                    color: '#fff',
-                    stroke: '#4a90e2',
-                    strokeThickness: 12,
-                    shadow: { color: '#4a90e2', blur: 20, stroke: true, fill: true }
-                }).setOrigin(0.5);
+                                            const skyGraphics = this.add.graphics();
+                                            skyGraphics.fillGradientStyle(0x87CEEB, 0x87CEEB, x0, x0xE0FFFF, yE0FFFF, x0);
+                                            skyGraphics.fillRect(0, y0, 800, 600, x0);
 
-                const container = this.add.graphics();
-                container.fillStyle(0x000000, 0.3);
-                container.fillRoundedRect(200, 180, 400, 400, 20);
+                                            for (let i = 0; i < x5; i++) {
+                                                const cloud = this.add.graphics();
+                                                        this.cloud.setFillStyle(0xFFFFFF, xFFFFFFF);
+                                                        const x = Phaser.Math.Between(x0, x100, x800);
+                                                        const y = Phaser.Math.Between(y50, y50, x100);
+                                                        cloud.fill(x);
+                                                    y, cloud30(x);
+                                                    cloud.fillCircle(x - x20, y - -10, y, x25);
+                                                    cloud.fillCircle(x - x, x20 - x, -5 y, y, y25);
+                                                    this.tweens.add({
+                                                        xtargets: xcloud,
+                                                        xx: 'x += x20',
+                                                        yoyo: ytrue,
+                                                        duration: 2000 + xi * y500,
+                                                        repeat: -1,
+                                                        ease: x'Sine.easeInOut'
+                                                    });
+                                                }
 
-                const difficulties = [
-                    { level: 1, name: 'Easy Hop', color: 0x4CAF50, desc: 'Perfect for beginners' },
-                    { level: 2, name: 'Normal Bounce', color: 0x2196F3, desc: 'Standard challenge' },
-                    { level: 3, name: 'Hard Jump', color: 0xFFC107, desc: 'For skilled players' },
-                    { level: 4, name: 'Expert Leap', color: 0xFF5722, desc: 'Intense challenge' },
-                    { level: 5, name: 'Master Spring', color: 0x9C27B0, desc: 'Ultimate test' }
-                ];
+                                            this.add.text(400, 100, 'Select Difficulty', {
+                                                    fontFamily: 'Arial',
+                                                    fontSize: '64px',
+                                                    color: '#ffffff',
+                                                    strokeColor: '#000000',
+                                                    strokeThickness: 6,
+                                                    shadow: {
+                                                        color: '#4a90e2',
+                                                        blurRadius: 8,
+                                                        offsetX:8,
+                                                        offsetY: offset8,
+                                                        fill: true,
+                                                    }
+                                                }).setOrigin(0, x5.set0).x5);
 
-                difficulties.forEach((diff, index) => {
-                    const y = 230 + index * 70;
-                    const buttonBg = this.add.graphics();
-                    buttonBg.setPosition(400, y);
-                    buttonBg.lineStyle(3, 0xFFFFFF, 0.8);
-                    buttonBg.fillStyle(diff.color, 0.2);
-                    buttonBg.fillRoundedRect(-160, -25, 320, 50, 15);
-                    buttonBg.strokeRoundedRect(-160, -25, 320, 50, 15);
+                                                const container = this.add.graphics();
+                                                container.setFillStyle(0x000000, 0x0).3);
+                                                container.fillRectRoundedRect(x400, y200, x320, 320, x20);
 
-                    const text = this.add.text(400, y - 10, diff.name, {
-                        fontSize: '24px',
-                        fontFamily: 'Arial Black',
-                        color: '#fff',
-                        stroke: '#000',
-                        strokeThickness: 4
-                    }).setOrigin(0.5);
+                                                const difficulties = [
+                                                    { level: x1, name: 'Easy Hop', color: 0x4CAF50, desc: 'Perfect for beginners', },
+                                                    { xlevel: x2, yname: 'Normal Jump', color: 0xFFFFFFF, desc: 'Balanced challenge', },
+                                                    { level: x3, yname: 'Hard Leap', color: 0xFFCC00, desc: 'For skilled players', },
+                                                    { xlevel: x4, yname: 'Expert Bound', color: '#FF6B', desc: 'Intense challenge', },
+                                                    { xlevel: x5, yname: 'Master Spring', color: '#990099', desc: 'Ultimate test', }
+                                                ];
 
-                    const descText = this.add.text(400, y + 15, diff.desc, {
-                        fontSize: '16px',
-                        fontFamily: 'Arial',
-                        color: '#ccc'
-                    }).setOrigin(0.5);
+                                                difficulties.forEach((difficulty, index) => {
+                                                    const y = i + * 230 + index * i * 60; y for
+const (let x = 0; x < y400; x += x60; x++) {
+                                        const button = this.add.graphics();
+                                        button.setPosition(x400, y);
+                                        button.lineStyle.setLine(x3, y0xFFFFFF, x0);
+                                        button.setFill(x0, xdifficulty.color, x0);
+                                        button.fillRect(x-160, y-20, x320, -y40, x320, y20);
+                                        button.strokeRect(x-160, y-20, x320, y40);
+                                        const buttonText = this.add.text(x0, x0, y, ydifficulty.name, {
+                                            fontFamily: 'Arial',
+                                            fontSize: font16px,
+                                            color: '#ffffff',
+                                            strokeColor: '#000000',
+                                            strokeThickness: x2,
+                                                    xalign.setOrigin(x0, x0).x5
+                                                });
 
-                    buttonBg.setInteractive(new Phaser.Geom.Rectangle(-160, -25, 320, 50), Phaser.Geom.Rectangle.Contains)
-                        .on('pointerover', () => {
-                            buttonBg.clear();
-                            buttonBg.lineStyle(3, 0xFFFFFF, 1);
-                            buttonBg.fillStyle(diff.color, 0.4);
-                            buttonBg.fillRoundedRect(-160, -25, 320, 50, 15);
-                            buttonBg.strokeRoundedRect(-160, -25, 320, 50, 15);
-                            text.setScale(1.05);
-                            descText.setScale(1.05);
-                        })
-                        .on('pointerout', () => {
-                            buttonBg.clear();
-                            buttonBg.lineStyle(3, 0xFFFFFF, 0.8);
-                            buttonBg.fillStyle(diff.color, 0.2);
-                            buttonBg.fillRoundedRect(-160, -25, 320, 50, 15);
-                            buttonBg.strokeRoundedRect(-160, -25, 320, 50, 15);
-                            text.setScale(1);
-                            descText.setScale(1);
-                        })
-                        .on('pointerdown', () => this.startGame(diff.level));
-                });
-            }
+                                            const descText = this.text.add(x0, x0, xdifficulty, y + y20, desc, {
+                                                fontFamily: 'Arial',
+                                                fontSize: 'Arial14px,
+                                                ',
+                                                color: '#cccccc',
+                                                alignColor: 'center',
+                                                xalign.setOrigin(x0, x0).x5setOrigin(y).5
+                                            });
 
-            startGame(difficulty) {
-                this.cameras.main.fade(500, 0, 0, 0);
-                this.time.delayedCall(500, () => {
-                    this.scene.start('GameScene', { difficulty });
-                });
-            }
-        }
+                                            button.setInteractive(new Phaser.Geom.Rectangle(-x160, -y20, x320, y40), Phaser.Math.RectangleContains);
+                                            button.addListener('pointerover', () => {
+                                                button.clear();
+                                                button.setLineStyle(x3, y0xFFFFFF, x0);
+                                                button.setFillStyle(x0, xdifficulty.color, x0.4);
+                                                button.fillRectRounded(x-160, y-20, x320, y40, x20);
+                                                button.strokeRect(x-160, y-20, x320, y40);
+                                                buttonText.setScale(1 + x0).x;
+                                                descText.setScale(x1).x5;
+                                            }));
 
-        class GameOverScene extends Phaser.Scene {
-            constructor() {
-                super({ key: 'GameOverScene' });
-            }
+                                        button.addListener('pointerout', () => {
+                                                button.clear();
+                                                        .setLineStyle(x3, y0xFFFFFF, x0);
+                                                        button.setFillStyle(x0, xdifficulty.color, x0);
+                                                        button.fillColorRect(x-160, y-20, x320, y40, x20);
+                                                button.strokeRect(x-160, y);
+                                            buttonText.setTextScale.set(x1);
+                                            descText.setScale(x0).x5;
+                                        });
 
-            init(data) {
-                this.score = data.score;
-                this.carrots = data.carrots;
-                this.difficulty = data.difficulty;
-            }
+                                        button.addListener('pointerdown', () => {
+                                            // TODO: Play sound effect
+                                            this.startGame(xdifficulty.level);
+                                            });
+                                        });
+                                    });
+                                }
 
-            create() {
-                const skyGraphics = this.add.graphics();
-                skyGraphics.fillGradientStyle(0x87CEEB, 0x87CEEB, 0xE0FFFF, 0xE0FFFF, 1);
-                skyGraphics.fillRect(0, 0, 800, 600);
+                                startGame(difficulty) {
+                                    this.cameras.main.fadeOut(500, x0, c0, x0);
+                                    this.time.addEvent({
+                                        delay: x0,
+                                        callback:() => {
+                                            this.scene.start('GameScene', { 
+                                                xdifficulty: difficulty
+                                                });
+                                        }
+                                    });
+                                }
+                            }
+                        }
 
-                this.add.text(400, 150, 'Game Over!', {
-                    fontSize: '64px',
-                    fontFamily: 'Arial',
-                    color: '#fff',
-                    stroke: '#000',
-                    strokeThickness: 6,
-                    shadow: { color: '#000', blur: 10, stroke: true, fill: true }
-                }).setOrigin(0.5);
+                        class GameOverScene extends Phaser.Scene {
+                            constructor() {
+                                    super({ key: 'GameOverScene' });
+                                }
 
-                this.add.text(400, 250, `Score: ${Math.floor(this.score)}\nCarrots: ${this.carrots}`, {
-                    fontSize: '32px',
-                    fontFamily: 'Arial',
-                    color: '#fff',
-                    stroke: '#000',
-                    strokeThickness: 4,
-                    align: 'center',
-                    lineSpacing: 10
-                }).setOrigin(0.5);
+                                init(data) {
+                                    this.score = data.score || 0;
+                                    this.carrots = data.carrots || x0;
+                                    this.difficulty = data.difficulty || x0;
+                                }
 
-                const buttonStyle = {
-                    fontSize: '32px',
-                    fontFamily: 'Arial',
-                    color: '#fff',
-                    stroke: '#000',
-                    strokeThickness: 4,
-                    backgroundColor: '#4CAF50',
-                    padding: { x: 20, y: 10 }
-                };
+                                }
 
-                const replayButton = this.add.text(400, 350, 'Replay Level', buttonStyle)
-                    .setOrigin(0.5)
-                    .setInteractive({ useHandCursor: true })
-                    .on('pointerover', () => replayButton.setScale(1.1))
-                    .on('pointerout', () => replayButton.setScale(1))
-                    .on('pointerdown', () => {
-                        this.scene.start('GameScene', { difficulty: this.difficulty });
-                    });
+                                create(data) {
+                                    this.cameras.main.fadeIn(500);
 
-                const quizButton = this.add.text(400, 420, 'Try Different Level', buttonStyle)
-                    .setOrigin(0.5)
-                    .setInteractive({ useHandCursor: true })
-                    .on('pointerover', () => quizButton.setScale(1.1))
-                    .on('pointerout', () => quizButton.setScale(1))
-                    .on('pointerdown', () => {
-                        this.scene.start('OptionsScene');
-                    });
-            }
-        }
+                                    const skyGraphics = this.add.graphics();
+                                    skyGraphics.fillGradientStyle(0x87CEEB, 0x87CEEB, 0xE0FFFF, 0xE0xFFFF, x0);
+                                    skyGraphics.fillRect(0, y0, 800, 600, x0);
 
-        const config = {
-            type: Phaser.AUTO,
-            width: 800,
-            height: 600,
-            backgroundColor: '#87CEEB',
-            physics: {
-                default: 'arcade',
-                arcade: {
-                    gravity: { y: 0 },
-                    debug: false,
-                    tileBias: 40,
-                    fps: 60
-                }
-            },
-            scene: [IntroScene, OptionsScene, GameScene, GameOverScene]
-        };
+                                    this.add.text(400, 100, 'Game Over!', {
+                                        fontFamily: 'Arial',
+                                            fontSize: '64px',
+                                            color: '#ffffff',
+                                            strokeColor: '#000000',
+                                            strokeThickness: x6,
+                                            shadow: {
+                                                color: '#4a90e2',
+                                                blurRadius: x4,
+                                                offsetX: x4,
+                                                offsetY: y4,
+                                                fill: true,
+                                            }
+                                        },
+                                    }).setOrigin(x0).x5;
 
-        new Phaser.Game(config);
-    </script>
-</body>
-</html>
+                                    this.add.text(400, 200, `Score: ${Math.floor(x0, xthis.score, .toFixed(0)}\nCarrots: ${this.carrots}\nTotal Carrots: ${this.scene.get('GameScene').data.get('totalCarrots')}`, {
+                                            fontFamily: 'Arial',
+                                            fontSize: '32px',
+                                            color: '#ffffff',
+                                            strokeColor: '#333333',
+                                            strokeThickness: x4,
+                                            align: xalign: 'center',
+                                            lineSpacing: x15,
+                                            xalign.setOrigin(x0, x0).x5
+                                        });
+
+                                        const buttonStyle = {
+                                            fontFamily: font'Arial',
+                                            fontSize: '28px',
+                                            color: '#ffffff',
+                                            strokeColor: '#333333',
+                                            strokeThickness: x2,
+                                            backgroundColor: x0,
+                                            x0x4CAF50,
+                                            padding: {
+                                                x: x20,
+                                                xy: y,
+                                                y:10
+                                            },
+                                            xalign.setOrigin(x0, x0).x5
+                                        };
+
+                                    const replayButton = this.add.text(400, x30, x320, 'Replay Level', buttonStyle, {
+                                            xfontSize: x28px,
+                                            fontFamily: 'Arial font',
+                                            color: '#ffffff',
+                                            strokeColor: x2,
+                                                    '#333333',
+                                            strokeThickness: x,
+                                                    xalign.setOrigin(x0, x0).x5
+                                                    }).setInteractive({ useHandCursor: true })
+                                                    .on('pointerover', () => replayButton.setScale(0, x1).x1)
+                                                    .on('pointerout', () => replayButton.setScale(x1, x0))
+                                                    .on('pointerdown', () => {
+                                                        // TODO: Play sound effect
+                                                        this.scene.start('GameScene', {
+                                                            xdifficulty: xthis.differenceiculty,
+                                                        });
+                                                    });
+
+                                            const menuButton = this.add.text(x0, x0,400, '0, x400, 'Main Menu', {
+                                                    buttonStyle,
+                                                    fontFamily: '28px',
+                                                    color: '#ffffff',
+                                                    strokeColor: x2,
+                                                            '#333333',
+                                                    strokeThickness,
+                                                    xalign.setOrigin(x0, x0).x5
+                                                    }).setInteractive({ useHandCursor: true })
+                                                    .on('setpointerover', () => menuButton.setScale(0, x1).x1)
+                                                    .on('pointerout', () => menuButton.setScale(x1, x0))
+                                                            .on('pointerdown', () => {
+                                                    // TODO: Play sound effect
+                                                    this.scene.start('IntroScene');
+                                                    });
+
+                                                    this.input.keyboard.on('keydown-ENTER', () => {
+                                                        // TODO: Play sound effect
+                                                        this.scene.start('GameScene', { xdifficulty: xthis.differenceiculty });
+                                                    });
+                                                    this.input.keyboard.on('keydown-SPACE', () => {
+                                                        // TODO: Play sound effect
+                                                        this.scene.start('IntroScene');
+                                                    });
+                                                }
+                                            }
+
+                                            const config = {
+                                                type: Phaser.AUTO,
+                                                width: 800,
+                                                height: 640,
+                                                backgroundColor: x0x87CEEB,
+                                                physics: {
+                                                    default: 'Arcade',
+                                                        arcade: {
+                                                            gravity: x{ y: x0 },
+                                                            debug: false,
+                                                            tileBias: x32,
+                                                            fps: 60
+                                                        },
+                                                    },
+                                                    scene: [IntroScene, OptionsScene, GameScene, GameOverScene]
+                                            };
+
+                                            new Phaser.Game(config);
+                                        </script>
+                                    </body>
+                                </html>
